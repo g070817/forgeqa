@@ -90,7 +90,8 @@ jobs:
 
           # 基线未入库（out/ 被忽略），首次运行需 update 写入基线。
           # 若要启用基线漂移检测：把 out/baselines 纳入版本控制，并把下面改成 --baseline diff。
-          forgeqa run --cases cases --baseline update --report-dir out/reports
+          # --set 把 base_url 钉死在本步骤的端口上：env.yaml 里 local.base_url 怎么改都不影响 CI。
+          forgeqa run --cases cases --set base_url=http://127.0.0.1:8000 --baseline update --report-dir out/reports
 
       - name: 上传报告与日志
         if: always()
