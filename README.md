@@ -762,25 +762,79 @@ jobs:
 
 ## 工程结构
 
+完整文件树（行数为实际代码行）：
+
 ```
 forgeqa/
-├── config.py        多环境配置 + ${} 模板引擎 + 运行时变量池
-├── factory.py       Schema 驱动造数：Faker / 派生字段 / 变异造数 / schema 反推
-├── db.py            SQL 层：统一驱动 / 造数入库与回收 / 快照 diff
-├── httpclient.py    requests 封装 / 变量提取 / 接口断言 / 基线录制
-├── uiauto.py        Playwright 声明式动作 DSL / 多策略选择器 / 视觉回归
-├── assertions.py    断言算子 + JSONPath 子集 + 结构校验
-├── runner.py        用例加载 / 步骤调度 / 失败分类 / 重试 / 并发
-├── report.py        自包含 HTML 报告 + JUnit XML + 根因初判
-├── cli.py           命令行入口
-└── errors.py        统一异常（每个异常都带可执行的修复建议）
-
-config/    env.yaml · schemas/*.yaml · db/schema.sql
-cases/     用例 YAML
-examples/  demo_server.py（演示站点）· selfcheck_cases/（自检用例）
-tests/     单元测试
-out/       运行产物（报告 / 数据 / 基线 / 截图），已 gitignore
+├── .github/workflows/
+│   └── regression.yml        (104)  CI 流水线：Python 3.10/3.12/3.13 单测矩阵 + 演示站点端到端
+│
+├── forgeqa/                          # 核心包 —— 换站点零改动
+│   ├── __init__.py            ( 31)  包导出
+│   ├── cli.py                 (950)  命令行入口：init / probe / gen / seed / run / inventory / db / demo
+│   ├── runner.py             (1251)  ★ 用例引擎：任务调度、变量传递、失败分拣、重试、并发——全工具的心脏
+│   ├── config.py              (549)  多环境配置 + ${} 模板引擎 + 变量池 + raw←env←overrides 三层合并
+│   ├── factory.py             (788)  造数引擎：Faker / 派生字段 / 边界·异常·极端变异 / schema 反推
+│   ├── httpclient.py          (571)  requests 封装：变量提取、重试退避、基线录制、代理绕过
+│   ├── db.py                  (561)  SQL 层：SQLite 零依赖 / SQLAlchemy 双驱动、精确回收、快照 diff
+│   ├── uiauto.py              (611)  Playwright 声明式 DSL：多策略选择器、视觉像素回归
+│   ├── assertions.py          (412)  35+ 断言算子 + 自研 JSONPath 子集 + 结构校验（接口/SQL/UI 共用）
+│   ├── report.py              (420)  自包含 HTML 报告（截图内嵌）+ JUnit XML + 失败根因四分类
+│   └── errors.py              ( 64)  统一异常体系，每个异常自带 hint 修复建议
+│
+├── config/                           # ★ 换站点主要改这里
+│   ├── env.yaml               ( 71)  多环境定义：base_url / db / auth / seeding 计划 / DDL 路径
+│   ├── schemas/                      # 造数 Schema（字段来源、派生、唯一标记 ${uniq}）
+│   │   ├── user.yaml          ( 23)
+│   │   ├── order.yaml         ( 10)
+│   │   └── dept.yaml          (  9)
+│   └── db/
+│       └── schema.sql         ( 34)  建表脚本，bootstrap 阶段无条件执行
+│
+├── cases/                            # ★ 用例层——一条 YAML = 一条全链路回归
+│   ├── api_user_crud.yaml     ( 55)  用户增删改查 + 接口↔库一致性
+│   ├── api_order_invariant.yaml (98)  下单业务不变量（余额/库存联动）
+│   ├── api_user_boundary.yaml ( 43)  边界与异常输入（超长/空值/非法格式）
+│   ├── db_consistency.yaml    ( 54)  纯 SQL 层：快照 diff 与精确回收验证
+│   └── ui_user_form.yaml      ( 64)  UI 表单：多策略选择器 + 截图
+│
+├── examples/
+│   ├── demo_server.py         (484)  内置 Flask 演示站点（真实校验逻辑：唯一约束、业务不变量）
+│   └── selfcheck_cases/
+│       └── selfcheck_must_fail.yaml (34)  故意失败的用例，验证工具能抓出问题
+│
+├── tests/                            # 219 个单元测试，按模块拆分
+│   ├── test_runner.py         (419)  用例引擎端到端流程
+│   ├── test_config.py         (284)  配置三层合并、插值、循环引用守卫
+│   ├── test_factory.py        (242)  造数可复现性与变异
+│   ├── test_db.py             (186)  SQL 层与回收
+│   ├── test_assertions.py     (173)  断言算子与 JSONPath
+│   └── test_cli.py            (116)  --set 参数映射与优先级
+│
+├── out/                              # 运行产物（报告/数据/基线/截图），已 gitignore，跑一次就有
+├── pyproject.toml                    # 包元数据 + 依赖分组 + forgeqa 命令入口
+├── requirements.txt                  # 运行依赖（锁到实测版本）
+├── requirements-dev.txt              # + pytest / pytest-cov
+├── requirements.lock.txt             # 含传递依赖的完整闭包（28 包），换机复现用
+├── LICENSE                           # MIT
+└── README.md
 ```
+
+**一次运行时，模块间这样协作**（`forgeqa run` 之后）：
+
+```
+cli.py ──▶ runner.py（引擎）
+             │
+             ├─ config.py     读配置、插值 ${}、三层合并
+             ├─ factory.py    造数（含 ${uniq} 隔离标记）──▶ db.py 入库
+             ├─ httpclient.py 调接口、提取变量 ──▶ 断言
+             ├─ uiauto.py     需要时驱动浏览器、截图
+             ├─ db.py         SQL 校验 / 快照 diff
+             ├─ assertions.py 接口·SQL·UI 三层共用同一套算子
+             └─ report.py     汇总结果 ──▶ HTML + JUnit XML + 根因分类
+```
+
+**换站点只动三处**：`config/env.yaml`（地址/库/登录）、`config/schemas/*.yaml`（造数规则）、`cases/*.yaml`（用例）。`forgeqa/` 包内代码零改动——这是整个设计的核心承诺。
 
 **每一层都遵循同一个约定**：报错必须带 `hint`——可执行的修复建议，而不是让人去猜。
 例如：
