@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# 运行时产物（报告、基线、截图、造数落盘、种子台账）
+out/
+
+# 测试与覆盖率
+.pytest_cache/
+pytest-cache-files-*/
+.coverage
+.coverage.*
+htmlcov/
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/
+
+# AI 助手工作区（本地上下文，不入库）
+.workbuddy/

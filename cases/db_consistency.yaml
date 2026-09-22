@@ -1,0 +1,54 @@
+# 数据一致性巡检（纯 SQL，不依赖任何接口）
+# 这类用例的价值：不管功能怎么改，这些数据不变量必须一直成立，且执行成本极低。
+id: TC-DB-CONSISTENCY-001
+title: 数据一致性巡检：订单状态/孤儿订单/金额/邮箱格式
+priority: P0
+layer: db
+tags: [db, smoke, invariant]
+
+steps:
+  - name: 订单状态必须在枚举内
+    db:
+      sql: "SELECT COUNT(*) AS bad FROM orders WHERE status NOT IN ('created','paid','shipped')"
+    assert:
+      - {scalar: {op: eq, value: 0, label: 不存在非法订单状态}}
+
+  - name: 不允许存在孤儿订单（用户已被删但订单还在）
+    db:
+      sql: >
+        SELECT COUNT(*) AS orphans FROM orders o
+        LEFT JOIN users u ON u.id = o.user_id WHERE u.id IS NULL
+    assert:
+      - {scalar: {op: eq, value: 0, label: 无孤儿订单}}
+
+  - name: 订单金额必须为正数
+    db:
+      sql: "SELECT COUNT(*) AS bad FROM orders WHERE amount <= 0"
+    assert:
+      - {scalar: {op: eq, value: 0}}
+
+  - name: 用户邮箱格式必须合法
+    db:
+      sql: "SELECT COUNT(*) AS bad FROM users WHERE email NOT LIKE '%@%.%' OR email LIKE '% %'"
+    assert:
+      - {scalar: {op: eq, value: 0}}
+
+  - name: 用户名唯一（DB 层兜底校验，防止绕过接口写入脏数据）
+    db:
+      sql: >
+        SELECT COUNT(*) AS dup FROM (
+          SELECT username FROM users GROUP BY username HAVING COUNT(*) > 1
+        )
+    assert:
+      - {scalar: {op: eq, value: 0}}
+
+  - name: 表结构关键列齐全（防 DDL 变更漏改）
+    db:
+      mode: query
+      sql: "PRAGMA table_info(users)"
+    extract:
+      cols: "rows"
+    assert:
+      - {rows_count: {op: gte, value: 11}}
+      - {sql: "SELECT COUNT(*) FROM pragma_table_info('orders') WHERE name IN ('order_no','user_id','amount')",
+         op: eq, value: 3, label: orders 表关键列未丢失}

@@ -1,0 +1,23 @@
+# 造数 Schema —— 一个实体一份，字段即生成规则
+# min_len / max_len 不只是文档：它会驱动 mutate 自动生成「长度边界」用例。
+#
+# ${uniq} 是「用例级唯一标记」：同一用例内恒定、不同用例互不相同。
+# 业务表上唯一约束的字段（用户名/邮箱等）一定要带上它，
+# 否则两条用例会撞出 409，看起来像缺陷，其实是测试数据串扰。
+entity: user
+count: 1
+unique: [email, phone, username]
+description: 用户实体（示例，可直接改字段适配你的站点）
+
+fields:
+  - {name: name,       gen: faker, method: name, min_len: 2, max_len: 20}
+  - {name: username,   gen: pattern, pattern: "qa_????", transform: "suffix:${uniq}",
+     min_len: 3, max_len: 20}
+  - {name: email,      gen: pattern, pattern: "@@@@.####",
+     transform: "suffix:${uniq}@example.com", min_len: 8, max_len: 64}
+  - {name: phone,      gen: fake_phone, min_len: 5, max_len: 20}   # 明显虚构 138 号段，符合脱敏要求
+  - {name: age,        gen: int, min: 18, max: 65}
+  - {name: role,       gen: choice, values: [user, admin], weights: [9, 1]}
+  - {name: dept,       gen: choice, values: [研发部, 测试部, 产品部]}
+  - {name: vip,        gen: expr, value: "${age} >= 30"}
+  - {name: created_at, gen: datetime, start: "-30d", end: now, fmt: "%Y-%m-%d %H:%M:%S"}

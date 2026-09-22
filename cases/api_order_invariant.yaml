@@ -1,0 +1,98 @@
+# 下单业务不变量：下单成功后，该用户的订单数必须 +1
+# 「接口返回 201」不等于「业务做对了」——这条用例就是用来抓这种偏差的。
+id: TC-API-ORDER-001
+title: 下单 → 业务不变量校验（用户订单数 +1）→ 落库校验 → 清理
+priority: P0
+layer: api
+tags: [api, smoke, order, invariant]
+data:
+  user: user.yaml
+  order: order.yaml
+
+steps:
+  - name: 造一个用户作为下单主体
+    http:
+      method: POST
+      path: /api/users
+      json:
+        name:     "${data.user.name}"
+        username: "${data.user.username}"
+        email:    "${data.user.email}"
+        phone:    "${data.user.phone}"
+        age:      ${data.user.age}
+        dept:     "${data.user.dept}"
+    extract:
+      uid: "$.data.id"
+    assert:
+      - {status: 201}
+
+  - name: 记录下单前的订单数
+    http:
+      method: GET
+      path: /api/users/${ctx.uid}
+    extract:
+      before: "$.data.order_count"
+    assert:
+      - {status: 200}
+      - {jsonpath: "$.data.order_count", op: gte, value: 0}
+
+  - name: 下单
+    http:
+      method: POST
+      path: /api/orders
+      json:
+        user_id: "${ctx.uid}"
+        amount: ${data.order.amount}
+        currency: "${data.order.currency}"
+        order_no: "${data.order.order_no}"
+    extract:
+      order_id: "$.data.id"
+      after: "$.data.orders_after"
+    assert:
+      - {status: 201}
+      - {jsonpath: "$.data.order_no", op: eq, value: "${data.order.order_no}"}
+      - {jsonpath: "$.data.amount", op: eq, value: "${data.order.amount}"}
+
+  - name: 计算期望值（演示 script 逃生舱：任何复杂场景都能用 Python 表达）
+    script:
+      expr: "${ctx.before} + 1"
+      var: expected_count
+
+  - name: 业务不变量断言：订单数必须等于下单前 +1
+    script:
+      expr: "${ctx.after}"
+      var: actual_count
+    assert:
+      - {var: actual_count, op: eq, value: "${ctx.expected_count}",
+         label: 下单后订单数 = 下单前 + 1}
+
+  - name: 数据库落库校验
+    db:
+      sql: >
+        SELECT o.order_no, o.amount, o.currency, o.status, u.id AS user_id
+        FROM orders o JOIN users u ON u.id = o.user_id
+        WHERE o.id = :oid
+      params: {oid: "${ctx.order_id}"}
+    assert:
+      - {rows_count: 1}
+      - {row: {field: order_no, op: eq, value: "${data.order.order_no}"}}
+      - {row: {field: user_id, op: eq, value: "${ctx.uid}"}}
+      - {each_row: {field: status, op: eq, value: created}}
+      - {sql: "SELECT COUNT(*) FROM orders WHERE user_id = :uid",
+         params: {uid: "${ctx.uid}"}, op: eq, value: "${ctx.expected_count}",
+         label: 库里该用户订单数等于期望值}
+
+  - name: 清理本次造数
+    db:
+      mode: execute
+      sql: "DELETE FROM orders WHERE user_id = :uid"
+      params: {uid: "${ctx.uid}"}
+    on_fail: continue
+
+  - name: 清理用户
+    http:
+      method: DELETE
+      path: /api/users/${ctx.uid}
+    assert:
+      - {status: 200}
+      - {jsonpath: "$.data.deleted", op: eq, value: 1}

@@ -1,0 +1,9 @@
+entity: dept
+count: 3
+unique: [dept_no]
+description: 部门实体（演示 seeding 入库：造数 + 自动登记 + 精确回收）
+
+fields:
+  - {name: dept_no, gen: pattern, pattern: "D###", transform: "suffix:${uniq}", min_len: 4, max_len: 16}
+  - {name: name,    gen: choice, values: [研发部, 测试部, 产品部, 运维部]}
+  - {name: status,  gen: const, value: 1}

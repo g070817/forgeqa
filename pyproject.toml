@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "forgeqa"
+version = "1.0.0"
+description = "通用造数与自动回归工具：Python(Requests/Playwright/Faker) + SQL，YAML 驱动，适配任意网站"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Jeff", email = "gao_jf@163.com" }]
+keywords = ["qa", "test-automation", "regression", "faker", "playwright", "requests", "sql", "test-data"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Testing",
+  "License :: OSI Approved :: MIT License",
+  "Natural Language :: Chinese (Simplified)",
+]
+
+dependencies = [
+  "requests>=2.31",
+  "PyYAML>=6.0",
+  "Faker>=22.0",
+]
+
+[project.optional-dependencies]
+ui = ["playwright>=1.40", "Pillow>=10.0"]
+db = ["SQLAlchemy>=2.0", "PyMySQL>=1.1"]
+demo = ["Flask>=3.0"]
+dev = ["pytest>=8.0", "pytest-cov>=5.0"]
+all = [
+  "playwright>=1.40", "Pillow>=10.0",
+  "SQLAlchemy>=2.0", "PyMySQL>=1.1",
+  "Flask>=3.0", "pytest>=8.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/g070817/forgeQA"
+Repository = "https://github.com/g070817/forgeQA"
+Issues = "https://github.com/g070817/forgeQA/issues"
+
+[project.scripts]
+forgeqa = "forgeqa.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["forgeqa*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.coverage.run]
+source = ["forgeqa"]
+omit = ["forgeqa/cli.py"]

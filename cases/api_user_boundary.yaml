@@ -1,0 +1,43 @@
+# 变异造数回归：把自动生成的边界/异常/极端数据灌进接口，验证错误处理
+# 这类用例是「AI 造数」性价比最高的地方——覆盖度提升快，几乎不用手写。
+id: TC-API-USER-MUT-001
+title: 创建用户接口的边界与异常输入回归
+priority: P1
+layer: api
+tags: [api, boundary, negative]
+data:
+  muts:
+    schema: user.yaml
+    mutate: true
+    categories: [boundary, abnormal]
+  user: user.yaml
+
+steps:
+  - name: 变异数据逐条打接口（断言以「不 5xx + 有明确错误响应」为准）
+    loop:
+      over: "${data.muts}"
+      as: m
+      on_fail: continue
+      steps:
+        - name: "${m.case_id} ${m.description}"
+          http:
+            method: POST
+            path: /api/users
+            json: "${m.data}"
+            retries: 0
+          assert:
+            - {status: [200, 201, 400, 409, 422], label: 不得出现 5xx / 超时}
+            - {time_lt: 5000}
+
+  - name: 清理本用例误造出的成功数据（按本用例的 uniq 后缀精确匹配）
+    db:
+      mode: execute
+      sql: "DELETE FROM users WHERE username LIKE :pat OR email LIKE :epat"
+      params:
+        pat: "qa_%${uniq}"
+        epat: "%${uniq}@example.com"
+    on_fail: continue
+    assert:
+      - {sql: "SELECT COUNT(*) FROM users WHERE username LIKE :pat",
+         params: {pat: "qa_%${uniq}"}, op: eq, value: 0,
+         label: 变异用例造出的数据已清理干净}

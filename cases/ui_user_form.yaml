@@ -1,0 +1,64 @@
+# UI 回归：Playwright 驱动，覆盖「正常提交」与「非法输入提示」两条路径
+# target 给了多个候选定位策略（label / placeholder / css），
+# 页面结构微调时不需要改用例——这就是「适配任意网站」在 UI 层的落地方式。
+id: TC-UI-USER-FORM-001
+title: 注册表单 UI 回归：正常提交成功 + 非法输入给出可读提示
+priority: P1
+layer: ui
+tags: [ui, smoke, form]
+data:
+  user: user.yaml
+
+steps:
+  - name: 打开注册页
+    ui:
+      - {action: goto, url: /ui/form}
+      - {action: wait_for, load_state: domcontentloaded}
+    assert:
+      - {visible: {text: 创建用户, css: "h1"}, label: 页面已渲染}
+      - {visible: {label: 姓名, placeholder: 请输入姓名, css: "#name"}}
+      - {count: {target: "form input", op: gte, value: 3}}
+      - {url_contains: /ui/form}
+
+  - name: 用 Faker 造的数据填表并提交
+    ui:
+      - {action: fill, target: {label: 姓名, css: "#name"}, value: "${data.user.name}"}
+      - {action: fill, target: "#username", value: "${data.user.username}"}
+      - {action: fill, target: {label: 邮箱, placeholder: name@example.com, css: "#email"},
+         value: "${data.user.email}"}
+      - {action: fill, target: "#age", value: "${data.user.age}"}
+      - {action: select, target: "#dept", value: 测试部}
+      - {action: click, target: {text: 提交, css: "#submitBtn"}}
+      - {action: wait_for, target: "#msg.ok"}
+    assert:
+      - {visible: {text: 创建成功, css: "#msg"}, label: 出现成功提示}
+      - {text_contains: {target: "#msg", value: "创建成功，用户 ID："}}
+      - {visible: "#resultBox", label: 结果区展开}
+      - {text_equals: {target: "#submitBtn", value: 提交}, label: 按钮状态已复位}
+      - {screenshot_diff: {name: ui_form_success, threshold: 0.05},
+         label: 成功态页面视觉无异常变化}
+
+  - name: 非法输入（姓名过短 / 用户名过短 / 邮箱格式错）必须给出可读提示
+    ui:
+      - {action: fill, target: "#name", value: "测"}
+      - {action: fill, target: "#username", value: "ab"}
+      - {action: fill, target: "#email", value: "not-an-email"}
+      - {action: click, target: "#submitBtn"}
+      - {action: wait_for, target: "#msg.err"}
+    assert:
+      - {visible: {text: 创建失败, css: "#msg"}}
+      - {text_contains: {target: "#msg", value: "长度需在 2-20"}}
+      - {text_contains: {target: "#msg", value: "邮箱格式不合法"}}
+      - {hidden: "#msg.ok", label: 不应残留上一次的成功提示}
+
+  - name: 清理本用例造出的数据（按本用例 uniq 后缀精确匹配，不误删他例数据）
+    db:
+      mode: execute
+      sql: "DELETE FROM users WHERE username LIKE :pat OR email LIKE :epat"
+      params:
+        pat: "qa_%${uniq}"
+        epat: "%${uniq}@example.com"
+    assert:
+      - {sql: "SELECT COUNT(*) FROM users WHERE username LIKE :pat",
+         params: {pat: "qa_%${uniq}"}, op: eq, value: 0,
+         label: UI 用例造出的数据已清理干净}

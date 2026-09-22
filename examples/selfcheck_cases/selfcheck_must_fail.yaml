@@ -1,0 +1,34 @@
+# 自检用例（meta-test）：故意断言错误，用来验证「回归工具本身确实能抓到问题」。
+# 一个抓不到失败的回归体系，比没有回归体系更危险。
+#
+# 只应通过 examples/selfcheck_cases 目录单独运行，不要放进日常回归集：
+#   forgeqa run --cases examples/selfcheck_cases
+id: SELFCHECK-SHOULD-FAIL-001
+title: 自检：故意写错的接口断言（预期失败）
+priority: P2
+layer: api
+tags: [selfcheck]
+skip: false
+
+steps:
+  - name: 健康检查（这一步是真断言，应当通过）
+    http:
+      method: GET
+      path: /health
+    assert:
+      - {status: 200}
+      - {jsonpath: "$.status", op: eq, value: up}
+
+  - name: 故意断言一个错误的业务码（预期失败）
+    http:
+      method: GET
+      path: /health
+    assert:
+      - {jsonpath: "$.status", op: eq, value: down,
+         label: 故意写错：期望 down，实际 up}
+
+  - name: 故意写错的 SQL 断言（预期失败）
+    db:
+      sql: "SELECT COUNT(*) AS n FROM users"
+    assert:
+      - {scalar: {op: eq, value: -1, label: 故意写错：行数不可能为 -1}}

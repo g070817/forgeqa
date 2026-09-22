@@ -1,0 +1,55 @@
+# 示例用例：接口 + 造数 + SQL 落库校验，三件套一次跑通
+# 复制这个文件改接口路径就能适配你自己的站点。
+id: TC-API-USER-001
+title: 创建用户 → 接口返回校验 → 数据库落库校验
+priority: P0
+layer: api
+tags: [api, smoke, user]
+data:
+  user: user.yaml            # 引用 config/schemas/user.yaml，count=1 时可直接 ${data.user.name}
+
+steps:
+  - name: 创建用户
+    http:
+      method: POST
+      path: /api/users
+      json:
+        name:     "${data.user.name}"
+        username: "${data.user.username}"
+        email:    "${data.user.email}"
+        phone:    "${data.user.phone}"
+        age:      ${data.user.age}
+        role:     "${data.user.role}"
+        dept:     "${data.user.dept}"
+    extract:
+      uid: "$.data.id"                 # 提取后供后续步骤用 ${ctx.uid}
+    assert:
+      - {status: 201}
+      - {jsonpath: "$.data.id", op: not_null, label: 返回了自增主键}
+      - {jsonpath: "$.data.name", op: eq, value: "${data.user.name}", label: 名称回显一致}
+      - {jsonpath: "$.code", op: eq, value: 0, label: 业务码为 0}
+      - {time_lt: 3000, label: 接口响应小于 3s}
+
+  - name: 落库校验（业务不变量：创建后库里必须查到 1 行）
+    db:
+      sql: >
+        SELECT name, email, role, status
+        FROM users
+        WHERE id = :uid
+      params: {uid: "${ctx.uid}"}
+    assert:
+      - {rows_count: 1}
+      - {row: {field: name, op: eq, value: "${data.user.name}"}}
+      - {each_row: {field: status, op: eq, value: 1}}
+      - {sql: "SELECT COUNT(*) FROM users WHERE email = :email",
+         params: {email: "${data.user.email}"}, op: eq, value: 1,
+         label: 邮箱在库里唯一}
+
+  - name: 清理本次造数
+    db:
+      mode: execute
+      sql: "DELETE FROM users WHERE id = :uid"
+      params: {uid: "${ctx.uid}"}
+    assert:
+      - {sql: "SELECT COUNT(*) FROM users WHERE id = :uid",
+         params: {uid: "${ctx.uid}"}, op: eq, value: 0}

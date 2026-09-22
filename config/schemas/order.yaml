@@ -1,0 +1,10 @@
+entity: order
+count: 1
+unique: [order_no]
+fields:
+  - {name: order_no,  gen: pattern, pattern: "QA########", transform: "suffix:${uniq}"}
+  - {name: user_id,   gen: int, min: 1, max: 1000}
+  - {name: amount,    gen: float, min: 1.0, max: 9999.0, precision: 2}
+  - {name: currency,  gen: choice, values: [CNY, USD]}
+  - {name: status,    gen: choice, values: [created, paid, shipped], weights: [5, 3, 2]}
+  - {name: created_at,gen: datetime, start: "-7d", end: now, fmt: "%Y-%m-%d %H:%M:%S"}
