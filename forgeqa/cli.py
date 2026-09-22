@@ -461,6 +461,75 @@ def cmd_probe(args) -> int:
     return EXIT_OK
 
 
+def cmd_scan(args) -> int:
+    from .scan import scan_site, write_case_file, write_schemas
+
+    # 扫描不强依赖项目配置：没有 config/env.yaml 也能对任意 URL 跑
+    try:
+        cfg = _load_cfg(args)
+    except ForgeQAError:
+        cfg = None
+    base = (args.url or (cfg.get("base_url") if cfg else "") or "").rstrip("/")
+    if not base:
+        _print("请提供 URL：forgeqa scan http://127.0.0.1:8000")
+        return EXIT_USAGE
+    headers = dict(cfg.get("http.headers") if cfg else {}) or {"Accept": "application/json"}
+    token = os.environ.get("FORGEQA_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    _print(f"扫描 {base}（OpenAPI → 页面爬取 → 路径字典，最多 {args.max_pages} 页 / "
+           f"{args.max_probes} 个试探）…\n")
+    result = scan_site(base, start_paths=tuple(args.path) or ("/",),
+                       max_pages=args.max_pages, timeout=args.timeout,
+                       headers=headers, max_probes=args.max_probes)
+
+    if result.openapi_from:
+        _print(f"✓ 发现 OpenAPI 文档: {result.openapi_from}（接口清单来自文档，最可靠）")
+    _print(f"爬取页面 {result.pages_crawled} 个，发现接口 {len(result.endpoints)} 个\n")
+
+    header = ["路径", "方法", "GET", "Content-Type", "schema", "来源"]
+    rows = []
+    for ep in result.endpoints:
+        has_schema = "✓" if ep.sample is not None else "-"
+        rows.append([ep.path, "/".join(sorted(ep.methods)) or "-",
+                     str(ep.status) if ep.status else "-",
+                     (ep.content_type.split(";")[0] if ep.content_type else "-"),
+                     has_schema, ep.source])
+    widths = [max(len(r[i]) for r in rows + [header]) + 2 for i in range(len(header))]
+    _print("".join(_pad(h, w) for h, w in zip(header, widths)))
+    _print("─" * sum(widths))
+    for r in rows:
+        _print("".join(_pad(c, w) for c, w in zip(r, widths)))
+    for err in result.errors:
+        _print(f"⚠ {err}")
+
+    if args.print_only:
+        return EXIT_OK
+
+    root = Path(args.root) if args.root else Path.cwd()
+    schema_writes = write_schemas(result, root / "config" / "schemas", force=args.force)
+    if schema_writes:
+        _print("\n--- 造数 Schema（人工核对后使用）---")
+        for path, note in schema_writes:
+            _print(f"  {path}  {note}")
+
+    case_file = None
+    if not args.no_cases:
+        case_file = write_case_file(result, root / "cases" / "_generated")
+        if case_file:
+            _print(f"\n--- 冒烟用例草稿 ---\n  {case_file}")
+            _print(f"  运行: forgeqa run --cases {case_file}")
+        else:
+            _print("\n没有 GET 可通的接口，未生成用例草稿。"
+                   "若站点需要登录，先 export FORGEQA_TOKEN=<token> 再扫。")
+
+    if not schema_writes and not case_file:
+        _print("\n没有产出。排查：站点是否可访问 / 接口是否都在登录墙后 / "
+               "是否是纯前端单页应用（接口路径不在页面与 JS 里，需要靠 OpenAPI 或手工补充）")
+    return EXIT_OK
+
+
 def _shape_of(body: Any, depth: int = 0, max_depth: int = 3) -> str:
     pad = "  " * depth
     if isinstance(body, dict):
@@ -858,6 +927,19 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--print-only", action="store_true", help="只打印不写文件")
     sp.add_argument("--force", action="store_true", help="覆盖已存在的 schema")
     sp.set_defaults(func=cmd_probe)
+
+    sp = sub.add_parser("scan", help="扫描站点发现接口，生成冒烟用例草稿与造数 Schema")
+    common(sp)
+    sp.add_argument("url", nargs="?", help="站点入口 URL，如 http://127.0.0.1:8000")
+    sp.add_argument("--path", action="append", default=[], metavar="PATH",
+                    help="额外的起始页面路径（可多次指定），默认从 / 开始爬")
+    sp.add_argument("--max-pages", type=int, default=8, help="最多爬取的页面数（默认 8）")
+    sp.add_argument("--timeout", type=float, default=4.0, help="单个请求超时秒数（默认 4）")
+    sp.add_argument("--max-probes", type=int, default=48, help="路径试探上限（默认 48）")
+    sp.add_argument("--print-only", action="store_true", help="只打印扫描结果，不写任何文件")
+    sp.add_argument("--force", action="store_true", help="覆盖已存在的 schema 文件")
+    sp.add_argument("--no-cases", action="store_true", help="只反推 schema，不生成用例草稿")
+    sp.set_defaults(func=cmd_scan)
 
     sp = sub.add_parser("gen", help="生成数据集（含变异造数）")
     common(sp)

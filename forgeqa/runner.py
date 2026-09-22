@@ -261,13 +261,19 @@ def load_cases(paths: Sequence[str | Path], root: Path) -> list[Case]:
             ) from exc
         if raw is None:
             continue
+        # 用例文件可能位于 root 之外（如 --cases /tmp/xxx.yaml 或 ../shared/），
+        # relative_to 会抛 ValueError，此时退回完整路径
+        try:
+            source = str(f.relative_to(root))
+        except ValueError:
+            source = str(f)
         docs = raw if isinstance(raw, list) else [raw]
         for doc in docs:
             if isinstance(doc, Mapping) and "cases" in doc:
                 for sub in doc["cases"]:
-                    cases.append(Case.from_dict(sub, source=str(f.relative_to(root))))
+                    cases.append(Case.from_dict(sub, source=source))
             elif isinstance(doc, Mapping) and "steps" in doc:
-                cases.append(Case.from_dict(doc, source=str(f.relative_to(root))))
+                cases.append(Case.from_dict(doc, source=source))
     if not cases:
         raise CaseError(
             f"在 {[str(p) for p in paths]} 下没有找到任何用例",

@@ -22,6 +22,7 @@
 - [安装](#安装)
 - [5 分钟跑通](#5-分钟跑通)
 - [适配你自己的网站](#适配你自己的网站)
+- [扫描站点：自动发现接口并生成用例](#扫描站点自动发现接口并生成用例)
 - [造数：Schema 参考](#造数schema-参考)
 - [用例：YAML 参考](#用例yaml-参考)
 - [配置：env.yaml 参考](#配置envyaml-参考)
@@ -224,6 +225,47 @@ steps:
 
 `target` 给多个候选定位策略，**按顺序尝试，谁先命中用谁**，首选策略等满超时、备选策略快速试探。
 页面结构微调时通常不需要改用例——这是 UI 层「适配任意网站」的落地方式。
+
+---
+
+## 扫描站点：自动发现接口并生成用例
+
+懒得逐个接口写 probe？`scan` 命令从一个入口 URL 出发自动发现接口，一键生成用例草稿：
+
+```bash
+forgeqa scan http://your-site.com          # 扫描 + 生成 schema + 生成冒烟用例
+forgeqa scan http://your-site.com --print-only   # 先只看看，不写文件
+```
+
+扫描走三路（质量从高到低）：
+
+| 来源 | 做法 | 可靠度 |
+|---|---|---|
+| OpenAPI 文档 | 探测 `/openapi.json`、`/swagger.json`、`/v3/api-docs` 等 | 接口清单精确 |
+| 页面爬取 | 抓 HTML 链接/表单 + 内联 JS 里的 `/api/...` 字符串，只爬同源、限页数 | 看前端写没写 |
+| 路径字典 | `/api/users`、`/health` 等高频路径逐个 GET 试探，405+`Allow` 也能发现非 GET 接口 | 盲区最大 |
+
+产出两样东西：
+
+- `config/schemas/<entity>.yaml` —— 从 JSON 响应**反推的造数 Schema**（枚举值、长度等业务约束需人工核对；目标文件已存在时不覆盖，写 `.inferred.yaml` 备份）
+- `cases/_generated/_scan_<host>.yaml` —— **可直接运行的 GET 冒烟用例** + 注释形式的 POST 草稿提示。`_` 前缀保证默认 `--cases cases` 不会误跑草稿，显式指定即可执行
+
+完整接入流程（换新站点时）：
+
+```bash
+# 1. 扫描：发现接口、反推 schema、生成冒烟
+forgeqa scan http://your-site.com
+
+# 2. 核对反推的 schema（重点看枚举、长度、必填），然后跑生成的冒烟
+forgeqa run --cases cases/_generated/_scan_<host>.yaml
+
+# 3. 参考 cases/api_user_crud.yaml，把核心 POST/SQL/UI 场景补成正式用例
+#    （scan 的输出里已列出发现的 POST 接口和对应 schema 路径作为提示）
+```
+
+已知边界：**登录墙后的接口扫不到**（先 `export FORGEQA_TOKEN=<token>` 重扫）；
+纯前端 SPA 的接口若既不在 HTML 也不在 JS 字符串里，只能靠 OpenAPI 文档或手工补充；
+扫描只能发现「接口存在」，业务规则（什么算对）永远需要人来定义。
 
 ---
 
@@ -645,6 +687,7 @@ assert:
 
 ```
 forgeqa init        生成项目脚手架（config / schemas / cases / ddl）
+forgeqa scan        扫描站点发现接口，生成冒烟用例草稿与造数 schema
 forgeqa probe       探测接口，从真实响应反推造数 schema
 forgeqa gen         生成数据集（正常 + 边界/异常/极端变异）
 forgeqa seed        按计划造数入库（可精确回收）
