@@ -114,3 +114,17 @@ class TestOverridesActuallyApply:
         cfg = ForgeConfig.load(None, env=None, overrides=_overrides([]), root=project)
         assert cfg.get("base_url") == "http://127.0.0.1:8000"
         assert cfg.get("http.retries") == 2
+
+
+class TestInitGuard:
+    def test_init_refuses_inside_package_dir(self, capsys):
+        """在 ForgeQA 源码包目录里跑 init 必须拒绝，防止脚手架污染源码树。"""
+        from forgeqa.cli import cmd_init
+
+        class Args:
+            root = str(Path(__file__).resolve().parent.parent / "forgeqa")
+            set = []
+            base_url = None
+
+        assert cmd_init(Args()) == 2          # EXIT_USAGE
+        assert "拒绝" in capsys.readouterr().out

@@ -337,6 +337,13 @@ out/
 
 def cmd_init(args) -> int:
     root = Path(args.root or Path.cwd())
+    # 守卫：在 ForgeQA 自己的包目录里跑 init 会把脚手架生成进包内（污染源码树）。
+    # 这是实际发生过两次的事故（init 以 cwd 为根，人在包目录里一敲就中招）。
+    if (root / "runner.py").exists() and (root / "cli.py").exists() and (root / "__init__.py").exists():
+        _print("✗ 当前目录是 ForgeQA 源码包本身，拒绝在这里生成脚手架。")
+        _print("  → 修复建议: cd 到你的目标项目目录再运行 forgeqa init，"
+               "或用 --root 指定目标目录")
+        return EXIT_USAGE
     created: list[Path] = []
 
     def write(rel: str, content: str, force: bool = False) -> None:
