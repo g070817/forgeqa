@@ -685,6 +685,13 @@ forgeqa run --cases cases --jobs 4
 
 ## 接入 CI
 
+本仓库已自带可用的流水线 [`.github/workflows/regression.yml`](.github/workflows/regression.yml)：
+push / PR 自动触发，Python 3.10 / 3.12 / 3.13 三档矩阵跑全量单测，随后用内置演示站点
+跑「造数 → 接口 → 查库 → UI → 断言 → 清理」端到端闭环，失败仍上传 HTML 报告与日志。
+推送到 GitHub 后即可在 Actions 页看到结果，无需任何配置。
+
+接入自己的被测系统时，把「启动演示站点」一步换成拉起你的服务，其余不变：
+
 ```yaml
 # .github/workflows/regression.yml
 name: regression
