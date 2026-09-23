@@ -450,6 +450,9 @@ forgeqa run --cases cases/_generated/_import_myproject.yaml
 # 4. 把通过的草稿转正：去掉文件名的 _ 前缀、按业务补 SQL/UI 断言后移入 cases/
 ```
 
+> `cases/_generated/` 已在 `.gitignore` 中忽略——草稿不入库；转正（改名并移入 `cases/`）后才提交。
+> 若确实要保留草稿，用 `git add -f` 强制加入。
+
 翻译约定与边界：
 
 | 文档里的定义 | 生成结果 |
