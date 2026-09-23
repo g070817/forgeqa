@@ -21,8 +21,11 @@
 - [为什么再造一个轮子](#为什么再造一个轮子)
 - [安装](#安装)
 - [5 分钟跑通](#5-分钟跑通)
+- [脚手架：forgeqa init 生成了什么、怎么撤销](#脚手架forgeqa-init-生成了什么怎么撤销)
+- [程序入口：从哪个文件执行](#程序入口从哪个文件执行)
 - [适配你自己的网站](#适配你自己的网站)
 - [扫描站点：自动发现接口并生成用例](#扫描站点自动发现接口并生成用例)
+- [导入接口文档：从 OpenAPI/Swagger 生成 POST 用例](#导入接口文档从-openapiswagger-生成-post-用例)
 - [造数：Schema 参考](#造数schema-参考)
 - [用例：YAML 参考](#用例yaml-参考)
 - [配置：env.yaml 参考](#配置envyaml-参考)
@@ -71,7 +74,7 @@ python -m playwright install chromium    # ← 别漏：下载浏览器内核
 | `requirements-dev.txt` | 上面 + `pytest` / `pytest-cov` | 要跑单测、改工具本身 |
 | `requirements.lock.txt` | 连传递依赖一起钉死（28 个包） | 换机器复现环境、排查环境差异 |
 
-> 本工程的锁定版本实测基线：**Python 3.13.12 / macOS arm64**，219 个单测 + 端到端套件 5/5 通过。全部依赖要求 Python >= 3.10。
+> 本工程的锁定版本实测基线：**Python 3.13.12 / macOS arm64**，277 个单测 + 端到端套件通过。全部依赖要求 Python >= 3.10。
 
 **方式二：从源码安装（带 `forgeqa` 命令）**
 
@@ -149,6 +152,81 @@ forgeqa run --cases examples/selfcheck_cases
 ```
 
 它会故意断言错误，报告里能看到期望值、实际值、以及根因初判（缺陷 / 环境 / 脚本 / 数据）。
+
+---
+
+## 脚手架：forgeqa init 生成了什么、怎么撤销
+
+### init 会生成什么
+
+`forgeqa init` 在当前目录（或 `--root` 指定目录）生成一份**固定清单**的项目脚手架，共 7 个文件：
+
+```
+<项目根>/
+├── config/
+│   ├── env.yaml                    # 多环境配置（base_url / db / auth / hooks）
+│   ├── schemas/
+│   │   ├── user.yaml               # 用户实体造数 Schema（示例）
+│   │   └── order.yaml              # 订单实体造数 Schema（示例）
+│   └── db/
+│       └── schema.sql              # 建表脚本，bootstrap 阶段执行
+├── cases/
+│   ├── api_user_crud.yaml          # 示例用例：用户增删改查 + 接口↔库一致性
+│   └── api_user_boundary.yaml      # 示例用例：边界与异常输入变异回归
+└── .gitignore                      # 忽略 out/ 与造数登记文件
+```
+
+行为约定：
+
+- **不覆盖已有文件**——目标文件已存在时跳过并提示，可安全地重复执行或对半成品目录补齐。
+- `--base-url` 与 `--set` 的值会写进 `config/env.yaml` 的 `envs.<环境名>` 段（默认 `local`），与运行时 `--set` 的临时覆盖不同。
+- **有守卫**：在 ForgeQA 源码包目录内执行会被拒绝（避免污染源码树），换项目时记得 `cd` 到目标目录或用 `--root`。
+- init 只写上面这 7 个文件，不会碰项目里的其他任何文件。
+
+### 不想要了，怎么撤销
+
+init 生成的内容全部在固定路径，删除即可完全还原：
+
+```bash
+cd 你的项目目录
+
+# 方式一：整目录删（连同运行产物一起清掉，最常用）
+rm -rf config cases out
+
+# 方式二：只删 init 生成的 7 个文件（保留目录里你自己加的东西）
+rm -f config/env.yaml config/schemas/user.yaml config/schemas/order.yaml \
+      config/db/schema.sql cases/api_user_crud.yaml cases/api_user_boundary.yaml \
+      .gitignore
+```
+
+> 注意：方式一会连同 `config/schemas/`、`cases/` 里**你自己后来添加的 schema 和用例一起删掉**；
+> 如果目录里已有自研内容，用方式二精确删除，再手动清理变空的目录。
+
+`out/`（报告 / 造数数据 / 基线 / 截图）是运行产物而非 init 产物，`forgeqa run` 跑一次就会重新出现，删掉无损。
+
+---
+
+## 程序入口：从哪个文件执行
+
+**执行入口是 `forgeqa/cli.py`**，所有子命令（`init` / `scan` / `import` / `probe` / `gen` / `seed` / `run` / `inventory` / `db` / `demo`）都定义在这里，由 `main()` 统一分发。
+
+三种等价的执行方式：
+
+```bash
+# 1) 安装后使用 forgeqa 命令（推荐）
+#    pip install -e ".[all]" 时，pyproject.toml 的 [project.scripts] 注册了：
+#    forgeqa = "forgeqa.cli:main"
+forgeqa run --cases cases
+
+# 2) 不安装，直接以模块方式运行
+python -m forgeqa.cli run --cases cases
+
+# 3) 直接执行脚本文件
+python forgeqa/cli.py run --cases cases
+```
+
+> 用 `forgeqa` 命令依赖安装；后两种方式只要在仓库根目录、依赖装好即可，适合临时调试。
+> `cli.py` 本身只做参数解析与分发，实际逻辑分派给 `runner.py`（执行）、`factory.py`（造数）、`scan.py`（扫描）等模块，见[工程结构](#工程结构)。
 
 ---
 
@@ -266,6 +344,61 @@ forgeqa run --cases cases/_generated/_scan_<host>.yaml
 已知边界：**登录墙后的接口扫不到**（先 `export FORGEQA_TOKEN=<token>` 重扫）；
 纯前端 SPA 的接口若既不在 HTML 也不在 JS 字符串里，只能靠 OpenAPI 文档或手工补充；
 扫描只能发现「接口存在」，业务规则（什么算对）永远需要人来定义。
+
+---
+
+## 导入接口文档：从 OpenAPI/Swagger 生成 POST 用例
+
+`scan` 在线探测的短板是**写接口**（POST/PUT/PATCH/DELETE）：请求体结构探测猜不出来，
+所以只能留草稿提示。但如果你手里有**接口文档**（OpenAPI 3 / Swagger 2，JSON 或 YAML，
+本地文件或 URL 均可），请求体 Schema 就写在文档里——`import` 命令把它翻译成
+造数 Schema 和可直接运行的 POST 用例：
+
+```bash
+forgeqa import ./openapi.yaml                      # 从本地文档导入
+forgeqa import http://your-site.com/openapi.json   # 从 URL 导入
+```
+
+> Apifox / Postman 等工具都可以把项目导出为 OpenAPI 格式后导入；Postman Collection 原生格式暂不支持。
+
+产出两样东西：
+
+- `config/schemas/<entity>.yaml` —— 从 requestBody Schema 翻译的造数 Schema：
+  `enum` → 加权选择、`format: email/uuid/date` 与字段名语义（phone/name/city…）→ 对应生成器、
+  `minLength/maxLength` → `min_len/max_len`（同时驱动变异造数）、`integer/number/boolean` → 区间/概率生成
+- `cases/_generated/_import_<名称>.yaml` —— 三类内容：
+  1. **POST 正常路径用例**（可直接运行，断言「不出现 5xx」）
+  2. **POST 边界与异常变异用例**（min-1/max+1/SQLi/XSS 等逐条打接口）
+  3. GET 冒烟 + 注释形式的带路径参数接口草稿（如 `PUT /api/users/{id}`）
+
+完整流程（拿到接口文档时）：
+
+```bash
+# 1. 导入：生成 schema 与 POST 用例草稿
+forgeqa import ./openapi.yaml --name myproject
+
+# 2. 人工核对 config/schemas/*.yaml 的枚举含义、必填语义、长度上限，
+#    并给唯一字段（用户名/邮箱）加 transform: "suffix:${uniq}" 防撞车
+
+# 3. 运行生成的草稿
+forgeqa run --cases cases/_generated/_import_myproject.yaml
+
+# 4. 把通过的草稿转正：去掉文件名的 _ 前缀、按业务补 SQL/UI 断言后移入 cases/
+```
+
+翻译约定与边界：
+
+| 文档里的定义 | 生成结果 |
+|---|---|
+| `enum: [user, admin]` | `gen: choice` |
+| `format: email` / 字段名含 phone、name、city… | 对应 Faker provider / 脱敏号段 |
+| `minLength` / `maxLength` | `min_len` / `max_len`（驱动边界变异） |
+| `type: integer`（名含 id） | `gen: seq` 自增，其余 `gen: int` 区间 |
+| 嵌套 `object` / `array` | `gen: const` 占位（引擎暂不支持嵌套生成，需人工补全） |
+| 带路径参数的写接口 `/api/users/{id}` | 不生成可执行用例（需先造资源），以注释草稿列出 |
+
+已知边界：文档里的业务约束机器读不全（哪些枚举值在什么条件下合法等），产出全部定位为**草稿**，
+`_` 前缀保证默认 `--cases cases` 不会误跑，人工核对转正后才有门禁效力。
 
 ---
 
@@ -688,6 +821,7 @@ assert:
 ```
 forgeqa init        生成项目脚手架（config / schemas / cases / ddl）
 forgeqa scan        扫描站点发现接口，生成冒烟用例草稿与造数 schema
+forgeqa import      从 OpenAPI/Swagger 接口文档生成 POST 用例草稿与造数 schema
 forgeqa probe       探测接口，从真实响应反推造数 schema
 forgeqa gen         生成数据集（正常 + 边界/异常/极端变异）
 forgeqa seed        按计划造数入库（可精确回收）
@@ -814,8 +948,10 @@ forgeqa/
 │
 ├── forgeqa/                          # 核心包 —— 换站点零改动
 │   ├── __init__.py            ( 31)  包导出
-│   ├── cli.py                 (950)  命令行入口：init / probe / gen / seed / run / inventory / db / demo
-│   ├── runner.py             (1251)  ★ 用例引擎：任务调度、变量传递、失败分拣、重试、并发——全工具的心脏
+│   ├── cli.py                (1082)  ★ 命令行入口（forgeqa 命令的执行入口）：init / scan / import / probe / gen / seed / run / inventory / db / demo
+│   ├── runner.py             (1257)  ★ 用例引擎：任务调度、变量传递、失败分拣、重试、并发——全工具的心脏
+│   ├── scan.py                (373)  站点扫描：OpenAPI 探测 / 页面爬取 / 路径字典，自动生成冒烟用例草稿
+│   ├── apidoc.py              (416)  接口文档导入：OpenAPI/Swagger → 写接口（POST）用例草稿与造数 Schema
 │   ├── config.py              (549)  多环境配置 + ${} 模板引擎 + 变量池 + raw←env←overrides 三层合并
 │   ├── factory.py             (788)  造数引擎：Faker / 派生字段 / 边界·异常·极端变异 / schema 反推
 │   ├── httpclient.py          (571)  requests 封装：变量提取、重试退避、基线录制、代理绕过
@@ -846,13 +982,15 @@ forgeqa/
 │   └── selfcheck_cases/
 │       └── selfcheck_must_fail.yaml (34)  故意失败的用例，验证工具能抓出问题
 │
-├── tests/                            # 219 个单元测试，按模块拆分
+├── tests/                            # 277 个单元测试，按模块拆分
 │   ├── test_runner.py         (419)  用例引擎端到端流程
 │   ├── test_config.py         (284)  配置三层合并、插值、循环引用守卫
 │   ├── test_factory.py        (242)  造数可复现性与变异
 │   ├── test_db.py             (186)  SQL 层与回收
 │   ├── test_assertions.py     (173)  断言算子与 JSONPath
-│   └── test_cli.py            (116)  --set 参数映射与优先级
+│   ├── test_scan.py           (183)  站点扫描与用例草稿生成
+│   ├── test_apidoc.py         (322)  接口文档导入：Schema 翻译、用例生成、端到端
+│   └── test_cli.py            (130)  --set 参数映射与优先级、init 守卫
 │
 ├── out/                              # 运行产物（报告/数据/基线/截图），已 gitignore，跑一次就有
 ├── pyproject.toml                    # 包元数据 + 依赖分组 + forgeqa 命令入口
@@ -895,15 +1033,17 @@ cli.py ──▶ runner.py（引擎）
 PYTHONPATH=. pytest tests -q
 ```
 
-**219 个用例**，全部通过。分布：
+**277 个用例**，全部通过。分布：
 
 | 文件 | 用例数 | 覆盖内容 |
 |---|---|---|
 | `test_assertions.py` | 65 | 断言算子、JSONPath 子集、结构校验 |
-| `test_cli.py` | 16 | `--set` 参数映射与优先级 |
+| `test_cli.py` | 17 | `--set` 参数映射与优先级、init 守卫 |
 | `test_config.py` | 39 | 配置三层合并、变量插值、循环引用守卫 |
 | `test_db.py` | 22 | SQL 层、造数回收、快照 diff |
 | `test_factory.py` | 38 | 造数可复现性、变异、schema 反推 |
 | `test_runner.py` | 39 | 用例引擎端到端流程 |
+| `test_scan.py` | 32 | 站点扫描、schema 反推写入、用例草稿生成 |
+| `test_apidoc.py` | 25 | 文档加载、$ref 解析、Schema 翻译、导入端到端 |
 
 不依赖网络与外部服务（SQLite + 合成响应）。

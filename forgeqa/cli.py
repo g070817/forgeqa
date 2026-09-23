@@ -537,6 +537,41 @@ def cmd_scan(args) -> int:
     return EXIT_OK
 
 
+# --------------------------------------------------------------------------- #
+# import —— 从接口文档（OpenAPI/Swagger）生成写接口用例草稿
+# --------------------------------------------------------------------------- #
+def cmd_import(args) -> int:
+    from .apidoc import import_spec, load_spec
+
+    spec = load_spec(args.source, timeout=args.timeout)
+    root = Path(args.root) if args.root else Path.cwd()
+    name = args.name or Path(args.source if not args.source.startswith(("http://", "https://"))
+                             else args.source.split("?")[0]).stem
+    result = import_spec(spec, name=name,
+                         cases_dir=root / "cases" / "_generated",
+                         schemas_dir=root / "config" / "schemas",
+                         force=args.force)
+
+    _print(f"接口文档导入完成: {args.source}")
+    _print(f"  接口操作 {result.op_total} 个 → POST 用例 {result.post_cases} 条"
+           f"（各带 1 条边界变异），GET 冒烟 {result.get_cases} 条")
+    if result.schemas:
+        _print("\n--- 造数 Schema（枚举含义/必填语义/长度上限请人工核对）---")
+        for path, note in result.schemas:
+            _print(f"  {path}  {note}")
+    if result.case_file:
+        _print(f"\n--- 用例草稿 ---\n  {result.case_file}")
+        _print(f"  运行: forgeqa run --cases {result.case_file}")
+    if result.drafts:
+        _print("\n--- 需要人工编写的接口（已写入草稿头注释）---")
+        for line in result.drafts:
+            _print(line.replace("# ", "  ", 1) if line.startswith("# ") else line)
+    if not result.schemas and not result.case_file:
+        _print("\n没有可执行产出。排查：文档里 POST 是否有 requestBody 的 properties 定义；"
+               "带路径参数的接口（如 /api/users/{id}）需要先造资源，请手工编写。")
+    return EXIT_OK
+
+
 def _shape_of(body: Any, depth: int = 0, max_depth: int = 3) -> str:
     pad = "  " * depth
     if isinstance(body, dict):
@@ -947,6 +982,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--force", action="store_true", help="覆盖已存在的 schema 文件")
     sp.add_argument("--no-cases", action="store_true", help="只反推 schema，不生成用例草稿")
     sp.set_defaults(func=cmd_scan)
+
+    sp = sub.add_parser("import", help="从 OpenAPI/Swagger 接口文档生成写接口（POST 等）用例草稿")
+    common(sp)
+    sp.add_argument("source", help="接口文档路径或 URL（OpenAPI 3 / Swagger 2，JSON 或 YAML）")
+    sp.add_argument("--name", help="导入名称，决定用例文件名（默认取文档文件名）")
+    sp.add_argument("--timeout", type=float, default=15, help="下载文档的超时秒数（默认 15）")
+    sp.add_argument("--force", action="store_true", help="覆盖已存在的 schema 文件")
+    sp.set_defaults(func=cmd_import)
 
     sp = sub.add_parser("gen", help="生成数据集（含变异造数）")
     common(sp)
