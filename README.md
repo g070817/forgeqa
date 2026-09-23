@@ -74,7 +74,7 @@ python -m playwright install chromium    # ← 别漏：下载浏览器内核
 | `requirements-dev.txt` | 上面 + `pytest` / `pytest-cov` | 要跑单测、改工具本身 |
 | `requirements.lock.txt` | 连传递依赖一起钉死（28 个包） | 换机器复现环境、排查环境差异 |
 
-> 本工程的锁定版本实测基线：**Python 3.13.12 / macOS arm64**，278 个单测 + 端到端套件通过。全部依赖要求 Python >= 3.10。
+> 本工程的锁定版本实测基线：**Python 3.13.12 / macOS arm64**，280 个单测 + 端到端套件通过。全部依赖要求 Python >= 3.10。
 
 **方式二：从源码安装（带 `forgeqa` 命令）**
 
@@ -656,6 +656,12 @@ target: "#submit"         # CSS 简写
 target: "//button"        # XPath
 ```
 
+> **等待状态**：定位默认等 `visible`（可交互前提），而不是「刚出现在 DOM」。
+> 只等 attached 会与页面的 autofocus 类脚本竞态——真实案例：WordPress 登录页的
+> `wp_attempt_focus()` 在加载约 200ms 后聚焦并选中账号框，导致对密码框 `fill`
+> 的值被写进账号框（值串位）。要读隐藏控件时显式退回：
+> `target: {css: "#hiddenInput", state: attached}`。
+
 ### `script` 步骤（逃生舱）
 
 ```yaml
@@ -1054,7 +1060,7 @@ forgeqa/
 │   └── selfcheck_cases/
 │       └── selfcheck_must_fail.yaml (34)  故意失败的用例，验证工具能抓出问题
 │
-├── tests/                            # 278 个单元测试，按模块拆分
+├── tests/                            # 280 个单元测试，按模块拆分
 │   ├── test_runner.py         (419)  用例引擎端到端流程
 │   ├── test_config.py         (284)  配置三层合并、插值、循环引用守卫
 │   ├── test_factory.py        (242)  造数可复现性与变异
@@ -1062,7 +1068,8 @@ forgeqa/
 │   ├── test_assertions.py     (173)  断言算子与 JSONPath
 │   ├── test_scan.py           (183)  站点扫描与用例草稿生成
 │   ├── test_apidoc.py         (322)  接口文档导入：Schema 翻译、用例生成、端到端
-│   └── test_cli.py            (148)  --set 参数映射与优先级、init 守卫与重复执行提示
+│   ├── test_cli.py            (148)  --set 参数映射与优先级、init 守卫与重复执行提示
+│   └── test_uiauto.py          (78)  UI 定位等待状态（需本机 chromium，无则跳过）
 │
 ├── out/                              # 运行产物（报告/数据/基线/截图），已 gitignore，跑一次就有
 ├── pyproject.toml                    # 包元数据 + 依赖分组 + forgeqa 命令入口
@@ -1114,7 +1121,7 @@ cli.py ──▶ scan.py    在线爬站点 → GET 冒烟用例 + 反推 schema
 PYTHONPATH=. pytest tests -q
 ```
 
-**278 个用例**，全部通过。分布：
+**280 个用例**，全部通过。分布：
 
 | 文件 | 用例数 | 覆盖内容 |
 |---|---|---|
@@ -1126,5 +1133,6 @@ PYTHONPATH=. pytest tests -q
 | `test_runner.py` | 39 | 用例引擎端到端流程 |
 | `test_scan.py` | 32 | 站点扫描、schema 反推写入、用例草稿生成 |
 | `test_apidoc.py` | 25 | 文档加载、$ref 解析、Schema 翻译、导入端到端 |
+| `test_uiauto.py` | 2 | UI 定位等待状态：fill 不被 autofocus 脚本抢走（无 chromium 自动跳过） |
 
-不依赖网络与外部服务（SQLite + 合成响应）。
+不依赖网络与外部服务（SQLite + 合成响应）；`test_uiauto.py` 需要本机浏览器，缺省自动跳过。

@@ -178,9 +178,19 @@ class UiDriver:
             return frame
         return self.page
 
-    def locate(self, spec: Any, *, strict: bool = True, timeout: int | None = None):
-        """按候选策略依次尝试，返回第一个在超时内可达的 locator。"""
+    def locate(self, spec: Any, *, strict: bool = True, timeout: int | None = None,
+               state: str | None = None):
+        """按候选策略依次尝试，返回第一个在超时内可达的 locator。
+
+        等待状态默认 ``visible``：只等 ``attached`` 会与页面的 autofocus 类脚本竞态
+        （典型：WordPress 登录页 wp_attempt_focus() 在 200ms 后聚焦并选中账号框，
+        此时对密码框 fill 的值会被写进刚被聚焦的账号框）。需要读隐藏控件时，
+        可在 target 对象里显式写 ``state: attached`` 覆盖。
+        """
         candidates = normalize_selectors(spec)
+        if state is None and isinstance(spec, Mapping):
+            state = str(spec.get("state") or "") or None
+        state = state or "visible"
         last_err: Exception | None = None
         root = self._root()
         total = timeout or self.timeout
@@ -190,7 +200,7 @@ class UiDriver:
             per = total if i == 0 else min(fast, total)
             try:
                 loc = root.locator(sel).first
-                loc.wait_for(state="attached", timeout=per)
+                loc.wait_for(state=state, timeout=per)   # type: ignore[arg-type]
                 return loc
             except Exception as exc:  # 换下一个策略
                 last_err = exc
