@@ -267,11 +267,32 @@ class HttpClient:
 
     # ---------------- 登录引导 ----------------
     def bootstrap_auth(self) -> dict[str, Any]:
-        """按配置里的 ``auth.login`` 定义完成登录并注入凭证。"""
+        """按配置里的 ``auth.login`` 定义完成登录并注入凭证。
+
+        除登录请求本身外还有两个可选项：
+
+        - ``login.prepare``：登录前的预备请求。CSRF token、``wordpress_test_cookie``
+          这类「必须先握一次手」的凭证靠它拿到——缺了它 WordPress 会直接拒绝登录。
+        - ``login.expect``：校验登录结果。登录失败必须显式报错，不能静默带着
+          匿名身份继续跑，否则后面的 401 会被误判成「接口坏了」。
+        """
         spec = self.auth_spec
         login = spec.get("login")
-        if str(spec.get("type", "")).lower() not in ("login", "form", "bearer") or not login:
+        if not supports_bootstrap(spec):
             return {}
+
+        for step in login.get("prepare") or []:
+            if not isinstance(step, Mapping):
+                continue
+            self.request(
+                str(step.get("method", "GET")),
+                str(self.ctx.resolve(step.get("path", "/"))),
+                json_body=self.ctx.resolve(step.get("json")),
+                data=self.ctx.resolve(step.get("data")),
+                headers=self.ctx.resolve(step.get("headers")),
+                retries=step.get("retries"),
+            )
+
         resp = self.request(
             str(login.get("method", "POST")),
             str(self.ctx.resolve(login.get("path", "/login"))),
@@ -280,6 +301,17 @@ class HttpClient:
             headers=self.ctx.resolve(login.get("headers")),
             retries=login.get("retries"),
         )
+
+        expect = login.get("expect") or {}
+        want = expect.get("status")
+        if want is not None:
+            wanted = want if isinstance(want, (list, tuple, set)) else [want]
+            if resp.status not in {int(w) for w in wanted}:
+                raise HttpError(
+                    f"登录失败：期望状态 {sorted(int(w) for w in wanted)}，实际 {resp.status}",
+                    hint=("检查 auth.login 的 path / data 字段名与凭证是否正确；"
+                          f"响应片段: {(resp.text or '')[:200]}"),
+                )
         extract = login.get("extract") or {}
         found: dict[str, Any] = {}
         for name, rule in extract.items():
@@ -297,6 +329,19 @@ class HttpClient:
             for c in self.session.cookies:
                 found.setdefault("_cookie_" + c.name, c.value)
         return found
+
+
+#: 需要「先登录再跑用例」的鉴权类型。配置里同时给了 auth.login 时，
+#: 引擎会在套件启动（或单条用例启动）时自动完成一次表单登录。
+BOOTSTRAP_AUTH_TYPES = ("login", "form", "bearer")
+
+
+def supports_bootstrap(spec: Any) -> bool:
+    """配置是否声明了「自动登录引导」——auth.type 是登录类且给了 auth.login。"""
+    if not isinstance(spec, Mapping):
+        return False
+    return (str(spec.get("type", "")).lower() in BOOTSTRAP_AUTH_TYPES
+            and bool(spec.get("login")))
 
 
 def _host_match(host: str, pattern: str) -> bool:

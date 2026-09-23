@@ -53,7 +53,8 @@ from .config import MISSING, Context, ForgeConfig, deep_get
 from .db import Database, Seeder, cleanup_from_ledger, diff_snapshots
 from .errors import AssertFailed, CaseError, DbError, ForgeQAError, HttpError, UiError
 from .factory import DataFactory
-from .httpclient import HttpClient, Recorder, eval_http_assertions, extract_value, jsonpath_first
+from .httpclient import (HttpClient, Recorder, eval_http_assertions, extract_value,
+                         jsonpath_first, supports_bootstrap)
 from .uiauto import UiDriver, eval_ui_assertions
 
 _EXPR_SUB_RE = re.compile(r"\$\{([^}]+)\}")
@@ -198,6 +199,7 @@ class Case:
     teardown: list[dict[str, Any]] = dc_field(default_factory=list)
     retries: int | None = None
     skip: Any = None
+    skip_if: Any = None
     baseline: dict[str, Any] | None = None
     source: str = ""
     raw: dict[str, Any] = dc_field(default_factory=dict)
@@ -219,6 +221,7 @@ class Case:
             teardown=list(data.get("teardown") or []),
             retries=data.get("retries"),
             skip=data.get("skip"),
+            skip_if=data.get("skip_if"),
             baseline=dict(data["baseline"]) if isinstance(data.get("baseline"), Mapping) else None,
             source=source,
             raw=dict(data),
@@ -333,6 +336,13 @@ class Executor:
                 self.result.error = str(self.case.skip) if not isinstance(self.case.skip, bool) else "用例标记为跳过"
                 return self.result
 
+            # 条件跳过：表达式为真则整条用例跳过（在登录引导之前判定，
+            # 避免为一条必然不跑的用例白做一次登录）
+            if self.case.skip_if is not None and _eval_condition(self.ctx, self.case.skip_if):
+                self.result.status = SKIPPED
+                self.result.error = f"skip_if 条件满足: {self.case.skip_if}"
+                return self.result
+
             self._prepare()
             failures: list[StepResult] = []
             aborted = False
@@ -405,7 +415,9 @@ class Executor:
         self.http = HttpClient(self.ctx, http_opts, base_url=self.cfg.get("base_url", ""),
                                logger=self.logger)
         # 需要登录态但变量池里还没有 token → 本用例自行完成一次登录（用例之间保持独立）
-        if str(auth_opts.get("type", "")).lower() == "bearer" and auth_opts.get("login") \
+        # Cookie 型登录（WordPress 一类）也走这里：套件级那次引导用的是临时 client，
+        # cookie 不会跟着到用例自己的 session，必须在用例级把 session 真正登录上。
+        if supports_bootstrap(auth_opts) \
                 and not self.ctx.get(str(auth_opts.get("token_var", "ctx.token")), None):
             self.http.bootstrap_auth()
 
@@ -1073,7 +1085,9 @@ class Runner:
         steps = list(hooks.get("bootstrap") or [])
         data_plan = hooks.get("seed") or []
 
-        # 登录引导：一次登录，token 进入 suite 变量池，所有用例复用
+        # 登录引导：一次登录，token 进入 suite 变量池，所有用例复用。
+        # 仅 bearer 型适合在这里做——token 能进变量池被用例复用；
+        # cookie 型登录只落在 client 的 session 上，必须由用例级 bootstrap 完成。
         auth_opts = dict(self.cfg.get("auth") or {})
         if str(auth_opts.get("type", "")).lower() == "bearer" and auth_opts.get("login"):
             http_opts = dict(self.cfg.get("http") or {})
