@@ -364,7 +364,8 @@ def write_case_file(
         "# 反推的造数 Schema（请人工核对枚举值、长度等业务约束）:",
         *(schema_lines or ["#   （未拿到 JSON 样本，无 schema 产出）"]),
         "",
-        "# POST 草稿——用 probe 探测请求体结构后参考 cases/api_user_crud.yaml 编写:",
+        "# POST 草稿——有接口文档时用 `forgeqa import <文档路径或URL>` 自动生成；",
+        "# 否则用 probe 探测请求体结构后参考 cases/api_user_crud.yaml 手工编写:",
         *(post_lines or ["#   （未发现 POST 接口）"]),
         "",
     ])

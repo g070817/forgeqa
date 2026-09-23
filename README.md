@@ -185,24 +185,41 @@ forgeqa run --cases examples/selfcheck_cases
 
 ### 不想要了，怎么撤销
 
-init 生成的内容全部在固定路径，删除即可完全还原：
+init 生成的就是上面列的那些固定路径文件，删掉它们即还原。**执行前先看清三件事**：
+
+1. **确认当前目录就是你的目标项目**（`pwd`）——这条命令删的是当前目录下的文件，敲错目录就没有后悔药。
+2. **被删的目录里有没有你自己的东西**：`config/schemas/`、`cases/` 里往往已经堆了自研 schema 与用例，
+   整目录删除会一并带走。
+3. **项目是否在版本控制下**（`git status`）：如果是，优先用 git 撤销，而不是 `rm`，误删也能一键找回。
 
 ```bash
 cd 你的项目目录
 
-# 方式一：整目录删（连同运行产物一起清掉，最常用）
-rm -rf config cases out
-
-# 方式二：只删 init 生成的 7 个文件（保留目录里你自己加的东西）
+# 推荐：只删 init 生成的 7 个文件，保留目录里你自己加的东西
 rm -f config/env.yaml config/schemas/user.yaml config/schemas/order.yaml \
       config/db/schema.sql cases/api_user_crud.yaml cases/api_user_boundary.yaml \
       .gitignore
+# 目录空了再手动删掉
+rmdir config/schemas config/db config cases 2>/dev/null
 ```
 
-> 注意：方式一会连同 `config/schemas/`、`cases/` 里**你自己后来添加的 schema 和用例一起删掉**；
-> 如果目录里已有自研内容，用方式二精确删除，再手动清理变空的目录。
+如果你确定这个目录**只有** init 生成的脚手架、没有任何自研内容，也可以整目录删（含运行产物）：
+
+```bash
+rm -rf config cases out        # ⚠️ 连你自己写的 schema / 用例一起删
+```
 
 `out/`（报告 / 造数数据 / 基线 / 截图）是运行产物而非 init 产物，`forgeqa run` 跑一次就会重新出现，删掉无损。
+它默认已被 `.gitignore` 忽略。
+
+> **误删了怎么办？**
+> - 项目在 git 版本控制下、且文件曾提交过：`git checkout -- config cases` 直接从仓库恢复。
+> - **ForgeQA 源码仓库本身**（克隆下来的这份）自带示例工程：`config/`、`cases/` 是**被 git 跟踪的文件**，
+>   在仓库根目录执行上面的整目录删除会删掉这些示例，用 `git checkout -- config cases` 即可恢复。
+> - 从未提交过、又没有备份的文件无法恢复——所以第三条「先看 git status」才是关键动作。
+>
+> 顺带一提：`forgeqa init` 本身有守卫，拒绝在 ForgeQA 源码**包目录**（`forgeqa/forgeqa/`）内生成脚手架；
+> 但删除操作没有任何守卫，它只是一条普通的 `rm`。
 
 ---
 
@@ -226,7 +243,8 @@ python forgeqa/cli.py run --cases cases
 ```
 
 > 用 `forgeqa` 命令依赖安装；后两种方式只要在仓库根目录、依赖装好即可，适合临时调试。
-> `cli.py` 本身只做参数解析与分发，实际逻辑分派给 `runner.py`（执行）、`factory.py`（造数）、`scan.py`（扫描）等模块，见[工程结构](#工程结构)。
+> `cli.py` 本身只做参数解析与分发，实际逻辑分派给 `runner.py`（执行）、`factory.py`（造数）、
+> `scan.py`（站点扫描）、`apidoc.py`（接口文档导入）等模块，见[工程结构](#工程结构)。
 
 ---
 
@@ -259,6 +277,12 @@ forgeqa probe https://staging.your-site.com/api/users --entity user
 # 生成的字段类型是推导出来的，人工核对枚举值 / 长度限制后再用
 $EDITOR config/schemas/user.yaml
 ```
+
+> 手里有接口文档时的更优路径（写接口尤其推荐）：
+> ```bash
+> forgeqa import ./openapi.yaml --name staging   # 一次拿到全部写接口的 schema 与 POST 用例
+> forgeqa scan https://staging.your-site.com     # 顺手把 GET 冒烟也扫出来
+> ```
 
 ### 第 3 步：写用例（复制改路径即可）
 
@@ -341,6 +365,10 @@ forgeqa run --cases cases/_generated/_scan_<host>.yaml
 #    （scan 的输出里已列出发现的 POST 接口和对应 schema 路径作为提示）
 ```
 
+> 手里有接口文档（OpenAPI/Swagger）时，**写接口不用手工补**——直接用
+> [`forgeqa import`](#导入接口文档从-openapiswagger-生成-post-用例) 生成 POST 用例与造数 Schema。
+> 两者可以配合：`scan` 摸清站点有哪些接口，`import` 把写接口的请求体结构补全。
+
 已知边界：**登录墙后的接口扫不到**（先 `export FORGEQA_TOKEN=<token>` 重扫）；
 纯前端 SPA 的接口若既不在 HTML 也不在 JS 字符串里，只能靠 OpenAPI 文档或手工补充；
 扫描只能发现「接口存在」，业务规则（什么算对）永远需要人来定义。
@@ -361,11 +389,45 @@ forgeqa import http://your-site.com/openapi.json   # 从 URL 导入
 
 > Apifox / Postman 等工具都可以把项目导出为 OpenAPI 格式后导入；Postman Collection 原生格式暂不支持。
 
+常用参数：
+
+| 参数 | 作用 |
+|---|---|
+| `--name` | 导入名称，决定用例文件名 `_import_<name>.yaml`（默认取文档文件名） |
+| `--force` | 覆盖已存在的 schema 文件（默认不覆盖，改写到 `<实体>.imported.yaml`） |
+| `--timeout` | 下载远程文档的超时秒数（默认 15） |
+
+命名与冲突规则：实体名**以接口路径为准**（`/api/users` → `users`，路径推导不出时用 `operationId`），
+同名实体自动加序号（`users_2`）；已存在的 schema 文件默认不动，翻译结果落到 `.imported.yaml` 供对比合并。
+
+一个真实执行的例子（对内置演示站点导入一份只写了 `/api/users` 的文档）：
+
+```bash
+$ forgeqa import ./demo_api.yaml --name demo
+接口文档导入完成: ./demo_api.yaml
+  接口操作 2 个 → POST 用例 1 条（各带 1 条边界变异），GET 冒烟 1 条
+
+--- 造数 Schema（枚举含义/必填语义/长度上限请人工核对）---
+  config/schemas/users.yaml  写入
+
+--- 用例草稿 ---
+  cases/_generated/_import_demo.yaml
+  运行: forgeqa run --cases cases/_generated/_import_demo.yaml
+
+$ forgeqa run --cases cases/_generated/_import_demo.yaml --set base_url=http://127.0.0.1:8000
+  总计 3   通过 3   失败 0   异常 0   跳过 0   flaky 0   通过率 100.0%
+```
+
+产出的 3 条用例分别是：GET 冒烟、POST 正常路径（用文档翻译的 schema 造数据）、
+POST 边界变异（边界 + 异常两类变异数据逐条打接口，断言不出现 5xx）。
+
 产出两样东西：
 
 - `config/schemas/<entity>.yaml` —— 从 requestBody Schema 翻译的造数 Schema：
-  `enum` → 加权选择、`format: email/uuid/date` 与字段名语义（phone/name/city…）→ 对应生成器、
-  `minLength/maxLength` → `min_len/max_len`（同时驱动变异造数）、`integer/number/boolean` → 区间/概率生成
+  `enum` → 枚举选择 `gen: choice`（文档里没有取值权重信息，均等随机）、
+  `format: email/uuid/date` 与字段名语义（phone/name/city…）→ 对应生成器、
+  `minLength/maxLength` → `min_len/max_len`（同时驱动变异造数）、`integer/number/boolean` → 区间/概率生成；
+  文档里的 `required` 列表会写进 schema 的 `required` 键（供人工核对参考，造数引擎默认全字段生成）
 - `cases/_generated/_import_<名称>.yaml` —— 三类内容：
   1. **POST 正常路径用例**（可直接运行，断言「不出现 5xx」）
   2. **POST 边界与异常变异用例**（min-1/max+1/SQLi/XSS 等逐条打接口）
@@ -846,6 +908,11 @@ forgeqa run --cases cases --baseline diff
 # 单条用例调试
 forgeqa run --cases cases -k 订单 --verbose --verbose
 
+# 发现接口：爬站点（GET 冒烟）/ 读接口文档（POST 写接口）
+forgeqa scan http://your-site.com --print-only
+forgeqa import ./openapi.yaml --name myproject
+forgeqa import http://your-site.com/openapi.json --force
+
 # 查看/清理造数
 forgeqa db tables
 forgeqa db query --sql "SELECT id,name FROM users LIMIT 5"
@@ -944,7 +1011,7 @@ jobs:
 ```
 forgeqa/
 ├── .github/workflows/
-│   └── regression.yml        (104)  CI 流水线：Python 3.10/3.12/3.13 单测矩阵 + 演示站点端到端
+│   └── regression.yml        (105)  CI 流水线：Python 3.10/3.12/3.13 单测矩阵 + 演示站点端到端
 │
 ├── forgeqa/                          # 核心包 —— 换站点零改动
 │   ├── __init__.py            ( 31)  包导出
@@ -1016,6 +1083,15 @@ cli.py ──▶ runner.py（引擎）
 ```
 
 **换站点只动三处**：`config/env.yaml`（地址/库/登录）、`config/schemas/*.yaml`（造数规则）、`cases/*.yaml`（用例）。`forgeqa/` 包内代码零改动——这是整个设计的核心承诺。
+
+**两个「先跑一次就少写一堆 YAML」的辅助入口**（出用例，不出判定）：
+
+```
+cli.py ──▶ scan.py    在线爬站点 → GET 冒烟用例 + 反推 schema（POST 只能留草稿提示）
+           apidoc.py  读接口文档 → POST 用例 + 造数 schema（请求体结构来自文档，最准）
+```
+
+两者产出的都是 `cases/_generated/` 下的草稿，人工核对后转正才进入正式用例集。
 
 **每一层都遵循同一个约定**：报错必须带 `hint`——可执行的修复建议，而不是让人去猜。
 例如：

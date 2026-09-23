@@ -9,6 +9,10 @@ venv/
 
 # 运行时产物（报告、基线、截图、造数落盘、种子台账）
 out/
+.forgeqa_seed_ledger.json
+
+# scan / import 生成的用例草稿（人工核对转正后再提交）
+cases/_generated/
 
 # 测试与覆盖率
 .pytest_cache/
