@@ -345,6 +345,11 @@ class Context:
                 f"变量 {expr!r} 未定义",
                 hint="检查拼写；造数变量来自数据工厂，运行时变量来自 extract 或 setup 步骤",
             )
+        # 配置里的值本身可能还是个模板，例如 env.yaml 里
+        # ``wp: {pass: "${os:WP_PASS:-UNSET}"}``；用例用 ${wp.pass} 引用时
+        # 要继续展开，否则条件判断（if）拿到的是模板字面量而不是真实值。
+        if isinstance(val, str) and _EXPR_RE.search(val):
+            return self._resolve_str(val)
         return val
 
     # ---------------- 递归插值 ----------------

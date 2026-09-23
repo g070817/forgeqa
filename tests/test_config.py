@@ -102,6 +102,30 @@ class TestContext:
         assert ctx.resolve("ctx.token") == "ctx.token", "resolve 对裸字符串原样返回"
         assert ctx.resolve_expr("ctx.token") == "TK", "resolve_expr 才做表达式求值"
 
+    def test_config_value_that_is_itself_a_template_is_expanded(self, monkeypatch):
+        """env.yaml 里的值可以是模板，引用时要继续展开。
+
+        真实场景：把登录信息集中到配置里
+        ``wp: {user: jeff, pass: "${os:WP_PASS:-UNSET}"}``，
+        用例写 ``if: "${wp.pass} != 'UNSET'"``。若 resolve_expr 不展开，
+        条件里拿到的是字面量 "${os:WP_PASS:-UNSET}"，恒为真，守卫失效。
+        """
+        ctx = Context(layers={"cfg": {"wp": {"user": "jeff",
+                                             "pass": "${os:FORGEQA_CFG_PASS:-UNSET}"}}})
+        monkeypatch.delenv("FORGEQA_CFG_PASS", raising=False)
+        assert ctx.resolve_expr("wp.pass") == "UNSET"
+        assert ctx.resolve("${wp.pass}") == "UNSET"
+        assert ctx.resolve_expr("wp.user") == "jeff"          # 静态值不受影响
+
+        monkeypatch.setenv("FORGEQA_CFG_PASS", "s3cret")
+        assert ctx.resolve_expr("wp.pass") == "s3cret"
+        assert ctx.resolve("${wp.pass}") == "s3cret"
+
+    def test_template_valued_config_still_guards_recursion(self):
+        ctx = Context(layers={"cfg": {"a": "${b}", "b": "${a}"}})
+        with pytest.raises(ConfigError):
+            ctx.resolve_expr("a")
+
     def test_recursive_guard(self):
         ctx = Context()
         ctx.set("a", "${b}")
