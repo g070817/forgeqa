@@ -98,3 +98,56 @@ class TestBootstrapAuth:
         found = client.bootstrap_auth()
         assert found["token"] == "T-123"
         assert ctx.get("login.token") == "T-123"
+
+
+# --------------------------------------------------------------------------- #
+# auth 段自身的模板插值
+# --------------------------------------------------------------------------- #
+class TestAuthSpecInterpolation:
+    """auth 段里的凭证常写成 ${os:XXX}（不进仓库），必须真解析。
+
+    回归锁：配置层只做三层合并、不做插值，若这里直接把 spec 交给 requests，
+    发出去的是字面量 "${os:XXX}"，服务端一律 401，且报错完全看不出原因。
+    """
+
+    def test_bearer_token_from_env(self, monkeypatch):
+        monkeypatch.setenv("QA_TOKEN", "tok-abc")
+        ctx = Context()
+        c = HttpClient(ctx, {"auth": {"type": "bearer", "token": "${os:QA_TOKEN:-UNSET}"}},
+                       base_url="http://127.0.0.1:8080")
+        assert c.session.headers.get("Authorization") == "Bearer tok-abc"
+
+    def test_unset_env_does_not_leak_template(self, monkeypatch):
+        monkeypatch.delenv("QA_TOKEN_NOPE", raising=False)
+        ctx = Context()
+        c = HttpClient(ctx, {"auth": {"type": "bearer", "token": "${os:QA_TOKEN_NOPE:-UNSET}"}},
+                       base_url="http://127.0.0.1:8080")
+        sent = str(c.session.headers.get("Authorization"))
+        assert "${" not in sent            # 字面量模板绝不能被当成凭证发出去
+        assert sent == "Bearer UNSET"      # 哨兵值：配合 skip_if 守卫生效
+
+    def test_basic_credentials_resolved(self, monkeypatch):
+        monkeypatch.setenv("QA_USER", "alice")
+        monkeypatch.setenv("QA_PASS", "s3cr3t")
+        ctx = Context()
+        c = HttpClient(ctx, {"auth": {"type": "basic", "username": "${os:QA_USER}",
+                                      "password": "${os:QA_PASS}"}},
+                       base_url="http://127.0.0.1:8080")
+        assert c.session.auth == ("alice", "s3cr3t")
+
+    def test_api_key_header_resolved(self, monkeypatch):
+        monkeypatch.setenv("QA_KEY", "k-9")
+        ctx = Context()
+        c = HttpClient(ctx, {"auth": {"type": "api_key", "name": "X-API-Key",
+                                      "value": "${os:QA_KEY}"}},
+                       base_url="http://127.0.0.1:8080")
+        assert c.session.headers.get("X-API-Key") == "k-9"
+
+    def test_custom_scheme_respected(self, monkeypatch):
+        """scheme 非 Bearer（如 Token）时，解析后的 token 也要按 scheme 拼。"""
+        monkeypatch.setenv("QA_TOKEN", "t-1")
+        ctx = Context()
+        c = HttpClient(ctx, {"auth": {"type": "bearer", "token": "${os:QA_TOKEN}",
+                                      "scheme": "Token"}},
+                       base_url="http://127.0.0.1:8080")
+        assert c.session.headers.get("Authorization") == "Token t-1"

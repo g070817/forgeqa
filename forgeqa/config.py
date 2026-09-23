@@ -538,8 +538,12 @@ class ForgeConfig:
     def context(self) -> Context:
         gen = self.raw.get("generators") or {}
         seed = gen.get("seed")
+        # ``cfg`` 层挂合并后的完整视图，而不是只挂顶层 ``raw``：配置里的值
+        # 绝大多数写在 ``defaults:`` / ``envs.<环境>:`` 下面，只挂顶层会让
+        # ``${cfg.auth.type}`` 这类引用永远取不到值（守卫条件因此静默失效）。
+        # 用 effective() 而不是 env：--set 覆盖也要能被用例读到。
         ctx = Context(
-            layers={"env": self.env, "cfg": self.raw},
+            layers={"env": self.env, "cfg": self.effective()},
             faker_locale=gen.get("locale", "zh_CN"),
             seed=int(seed) if seed is not None else None,
             base_dir=self.root,

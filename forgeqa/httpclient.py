@@ -122,7 +122,11 @@ class HttpClient:
         self.logger = logger
         self.session = requests.Session()
         self.session.headers.update({str(k): str(v) for k, v in (self.opts.get("headers") or {}).items()})
-        self.auth_spec: dict[str, Any] = dict(self.opts.get("auth") or {})
+        # auth 段里的值同样可能是模板：token / username / password / value 的常见
+        # 写法是 ${os:XXX}（凭证不进仓库）。配置层只做三层合并、不做插值，必须
+        # 在这里解析——否则发出去的是字面量 "${os:XXX}"，服务端一律 401，
+        # 而报错信息里看不到任何线索。
+        self.auth_spec: dict[str, Any] = dict(self.ctx.resolve(self.opts.get("auth") or {}) or {})
         self.log: list[dict[str, Any]] = []
         self._apply_auth()
 
@@ -142,7 +146,7 @@ class HttpClient:
             self._pending_bearer = token
         elif kind == "basic":
             self.session.auth = (str(spec.get("username", "")), str(spec.get("password", "")))
-        elif kind in ("header", "api_key_header"):
+        elif kind in ("header", "api_key", "api_key_header"):
             name = str(spec.get("name", "X-API-Key"))
             val = spec.get("value") or self.ctx.get(str(spec.get("value_var", "")), "")
             self.session.headers[name] = str(val)
