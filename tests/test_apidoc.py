@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -206,6 +207,87 @@ class TestSchemaToFields:
         assert fs["mobile_phone"]["gen"] == "fake_phone"
 
 
+class TestOpenApi31Shapes:
+    """OpenAPI 3.1 / Pydantic v2 的写法：可选字段是 anyOf: [T, null]，不是 type+nullable。
+
+    不摊平的话 `type` 键缺失 → 一律按字符串处理 → 数组被造成长单词、对象被造成长单词。
+    """
+
+    def _fields(self, sch):
+        return {f["name"]: f for f in schema_to_fields("t", sch, {})["fields"]}
+
+    def _one(self, prop):
+        return self._fields({"type": "object", "properties": {"f": prop}})["f"]
+
+    def test_nullable_string_keeps_string_gen(self):
+        f = self._one({"anyOf": [{"type": "string"}, {"type": "null"}], "title": "Key"})
+        assert f["gen"] == "faker" and f["method"] == "word"
+
+    def test_nullable_array_is_not_a_string(self):
+        f = self._one({"anyOf": [{"items": {"type": "string", "format": "uri"},
+                                  "type": "array"}, {"type": "null"}]})
+        assert f["gen"] == "list"                       # 修复前是 faker word
+        assert f["item"]["method"] == "url"
+
+    def test_nullable_object_is_placeholder_not_string(self):
+        f = self._one({"anyOf": [{"type": "object", "properties": {"a": {"type": "string"}}},
+                                 {"type": "null"}]})
+        assert f["gen"] == "const" and f["value"] == {}
+        assert "嵌套对象" in f["description"]
+
+    def test_nullable_boolean(self):
+        f = self._one({"anyOf": [{"type": "boolean"}, {"type": "null"}]})
+        assert f["gen"] == "bool"
+
+    def test_type_as_list(self):
+        f = self._one({"type": ["integer", "null"], "minimum": 3})
+        assert f["gen"] == "int" and f["min"] == 3
+
+    def test_null_only_type(self):
+        f = self._one({"type": "null"})
+        assert f["gen"] == "const" and f["value"] is None
+
+    def test_const(self):
+        f = self._one({"const": "normal"})
+        assert f == {"name": "f", "gen": "const", "value": "normal"}
+
+    def test_pattern_becomes_regex(self):
+        f = self._one({"type": "string", "pattern": "^[A-Z0-9-]+$",
+                       "minLength": 6, "maxLength": 32})
+        assert f["gen"] == "regex" and f["pattern"] == "^[A-Z0-9-]+$"
+        assert "method" not in f                        # 不再残留 faker provider
+        # 长度约束保留：值生成用不到，但变异造数靠它产出长度边界用例
+        assert f["min_len"] == 6 and f["max_len"] == 32
+
+    def test_complex_pattern_annotated_not_faked(self):
+        f = self._one({"type": "string", "pattern": "^(a|b)-\\d+$"})
+        assert f["gen"] != "regex"                      # 展开器不保证满足，宁可不换
+        assert "正则" in f["description"]
+
+    def test_array_of_scalars_counts_from_min_max_items(self):
+        f = self._one({"type": "array", "items": {"type": "string"},
+                       "minItems": 2, "maxItems": 4})
+        assert f["gen"] == "list" and f["count"] == [2, 4]
+
+    def test_array_of_objects_is_placeholder(self):
+        f = self._one({"type": "array", "items": {"type": "object",
+                                                 "properties": {"a": {"type": "string"}}}})
+        assert f["gen"] == "const" and f["value"] == []
+
+    def test_all_of_merges_properties_and_required(self):
+        f = self._one({"allOf": [
+            {"type": "object", "properties": {"a": {"type": "string"}},
+             "required": ["a"]},
+            {"type": "object", "properties": {"b": {"type": "integer"}},
+             "required": ["b"]},
+        ]})
+        assert f["gen"] == "const"                      # 合并后是对象 → 占位
+        out = schema_to_fields("t", {"type": "object", "properties": {
+            "f": {"allOf": [{"type": "object", "properties": {"a": {"type": "string"}}},
+                            {"type": "object", "properties": {"b": {"type": "integer"}}}]}}}, {})
+        assert {x["name"] for x in out["fields"]} == {"f"}   # allOf 不炸，外层照常产出
+
+
 # --------------------------------------------------------------------------- #
 # build_import_docs
 # --------------------------------------------------------------------------- #
@@ -309,6 +391,44 @@ class TestImportSpec:
         result = import_spec(spec, name="x",
                              cases_dir=tmp_path / "c", schemas_dir=tmp_path / "s")
         assert result.case_file is None and result.schemas == []
+
+    def test_openapi31_end_to_end(self, tmp_path):
+        """3.1 文档（FastAPI 形态）导入后，造出的数据类型正确，长度边界变异仍在。"""
+        spec = {
+            "openapi": "3.1.0",
+            "info": {"title": "t", "version": "1"},
+            "paths": {"/api/orders": {"post": {
+                "requestBody": {"content": {"application/json": {"schema": {
+                    "$ref": "#/components/schemas/Order"}}}},
+                "responses": {"200": {"description": "ok"}}}}},
+            "components": {"schemas": {"Order": {
+                "type": "object",
+                "required": ["sku"],
+                "properties": {
+                    "sku": {"type": "string", "pattern": "^[A-Z0-9-]+$",
+                            "minLength": 6, "maxLength": 32},
+                    "priority": {"const": "normal"},
+                    "tags": {"anyOf": [{"type": "array", "items": {"type": "string"}},
+                                       {"type": "null"}]},
+                    "config": {"anyOf": [{"type": "object",
+                                          "properties": {"a": {"type": "string"}}},
+                                         {"type": "null"}]},
+                    "enabled": {"anyOf": [{"type": "boolean"}, {"type": "null"}]},
+                }}}},
+        }
+        import_spec(spec, name="owui", cases_dir=tmp_path / "c", schemas_dir=tmp_path / "s")
+        schema = yaml.safe_load((tmp_path / "s" / "orders.yaml").read_text(encoding="utf-8"))
+
+        factory = DataFactory(Context(seed=20260922, faker_locale="zh_CN"))
+        row = factory.generate(schema)[0]
+        assert re.fullmatch(r"[A-Z0-9-]+", row["sku"])        # 文档正则真的被展开
+        assert row["priority"] == "normal"                    # const 原样落地
+        assert isinstance(row["tags"], list)                  # 修复前：被造成一个字符串
+        assert isinstance(row["enabled"], bool)               # 修复前：被造成一个字符串
+        assert row["config"] == {}                            # 嵌套对象仍占位，待人工补
+
+        muts = factory.mutate(schema, categories=["boundary"])
+        assert any("sku" in m["description"] and "长度" in m["description"] for m in muts)
 
 
 # --------------------------------------------------------------------------- #

@@ -74,7 +74,7 @@ python -m playwright install chromium    # ← 别漏：下载浏览器内核
 | `requirements-dev.txt` | 上面 + `pytest` / `pytest-cov` | 要跑单测、改工具本身 |
 | `requirements.lock.txt` | 连传递依赖一起钉死（28 个包） | 换机器复现环境、排查环境差异 |
 
-> 本工程的锁定版本实测基线：**Python 3.13.12 / macOS arm64**，308 个单测 + 端到端套件通过。全部依赖要求 Python >= 3.10。
+> 本工程的锁定版本实测基线：**Python 3.13.12 / macOS arm64**，323 个单测 + 端到端套件通过。全部依赖要求 Python >= 3.10。
 
 **方式二：从源码安装（带 `forgeqa` 命令）**
 
@@ -448,6 +448,23 @@ POST 边界变异（边界 + 异常两类变异数据逐条打接口，断言不
   1. **POST 正常路径用例**（可直接运行，断言「不出现 5xx」）
   2. **POST 边界与异常变异用例**（min-1/max+1/SQLi/XSS 等逐条打接口）
   3. GET 冒烟 + 注释形式的带路径参数接口草稿（如 `PUT /api/users/{id}`）
+
+**OpenAPI 3.1 / Pydantic v2 的写法**（FastAPI 自动生成文档的主形态）已直接支持——这一版
+把可选字段从 `type` + `nullable` 改成了联合类型，不专门摊平就会被当成普通字符串：
+
+| 文档写法 | 翻译结果 |
+|---|---|
+| `anyOf: [{type: T}, {type: null}]`（`Optional[T]`） | 取非 null 分支按 T 翻译。**不摊平会把数组、对象都造成一个长单词** |
+| `type: ["string", "null"]`（3.1 允许 `type` 是数组） | 取第一个非 null 类型 |
+| `allOf`（继承式建模） | 合并各分支的 `properties` / `required` |
+| `const: "normal"` | `gen: const`，原样落地 |
+| `type: string` + `pattern` | `gen: regex`（字面量、字符类、`\d\w`、`{n,m}`、`+*?` 可展开，造出的值真实满足约束） |
+| `type: array` + `items`（标量元素） | `gen: list`，元素按 `items` 造数，条数取 `minItems~maxItems` |
+| `type: array` + `items: $ref`、嵌套 `object` | 占位 `[]` / `{}` 并在字段上注明——造数引擎暂不支持嵌套结构生成 |
+
+已知边界（3.1 文档尤其常见）：**嵌套结构只给占位，必须人工补全**才能真正打通——对象元素
+数组、多层对象（如 Open WebUI 的 `OLLAMA_API_CONFIGS`）都落在这一类；含分组或 `|` 的正则
+不硬凑，退回普通造数并在字段上标注，避免生成"看着像"却不满足约束的值。
 
 完整流程（拿到接口文档时）：
 
@@ -1059,7 +1076,7 @@ forgeqa/
 │   ├── cli.py                (1088)  ★ 命令行入口（forgeqa 命令的执行入口）：init / scan / import / probe / gen / seed / run / inventory / db / demo
 │   ├── runner.py             (1271)  ★ 用例引擎：任务调度、变量传递、失败分拣、重试、并发——全工具的心脏
 │   ├── scan.py                (497)  站点扫描：OpenAPI / REST 路由表 / 页面爬取 / 路径字典四路发现接口，生成冒烟与「登录后可访问」用例草稿
-│   ├── apidoc.py              (416)  接口文档导入：OpenAPI/Swagger → 写接口（POST）用例草稿与造数 Schema
+│   ├── apidoc.py              (490)  接口文档导入：OpenAPI 3.0/3.1 与 Swagger 2 → 写接口（POST）用例草稿与造数 Schema
 │   ├── config.py              (549)  多环境配置 + ${} 模板引擎 + 变量池 + raw←env←overrides 三层合并
 │   ├── factory.py             (788)  造数引擎：Faker / 派生字段 / 边界·异常·极端变异 / schema 反推
 │   ├── httpclient.py          (616)  requests 封装：变量提取、重试退避、基线录制、代理绕过、登录引导
@@ -1090,14 +1107,14 @@ forgeqa/
 │   └── selfcheck_cases/
 │       └── selfcheck_must_fail.yaml (34)  故意失败的用例，验证工具能抓出问题
 │
-├── tests/                            # 308 个单元测试，按模块拆分
+├── tests/                            # 323 个单元测试，按模块拆分
 │   ├── test_runner.py         (419)  用例引擎端到端流程
 │   ├── test_config.py         (308)  配置三层合并、插值、循环引用守卫
 │   ├── test_factory.py        (242)  造数可复现性与变异
 │   ├── test_db.py             (186)  SQL 层与回收
 │   ├── test_assertions.py     (173)  断言算子与 JSONPath
 │   ├── test_scan.py           (252)  站点扫描、REST 路由表发现、用例草稿生成
-│   ├── test_apidoc.py         (322)  接口文档导入：Schema 翻译、用例生成、端到端
+│   ├── test_apidoc.py         (442)  接口文档导入：Schema 翻译、3.1 联合类型摊平、用例生成、端到端
 │   ├── test_cli.py            (148)  --set 参数映射与优先级、init 守卫与重复执行提示
 │   ├── test_auth.py           (100)  登录引导：类型门槛、预备请求顺序、失败显式报错
 │   └── test_uiauto.py         (132)  UI 定位等待状态与 fill 读回校验（需本机 chromium，无则跳过）
@@ -1152,7 +1169,7 @@ cli.py ──▶ scan.py    在线探站点 → 冒烟用例 + 登录守卫用�
 PYTHONPATH=. pytest tests -q
 ```
 
-**308 个用例**，全部通过。分布：
+**323 个用例**，全部通过。分布：
 
 | 文件 | 用例数 | 覆盖内容 |
 |---|---|---|
@@ -1161,7 +1178,7 @@ PYTHONPATH=. pytest tests -q
 | `test_config.py` | 41 | 配置三层合并、变量插值、循环引用守卫 |
 | `test_runner.py` | 39 | 用例引擎端到端流程、`skip_if` 条件跳过 |
 | `test_factory.py` | 38 | 造数可复现性、变异、schema 反推 |
-| `test_apidoc.py` | 25 | 文档加载、$ref 解析、Schema 翻译、导入端到端 |
+| `test_apidoc.py` | 38 | 文档加载、$ref 解析、Schema 翻译、3.1 联合类型/`const`/`pattern`/数组、导入端到端 |
 | `test_db.py` | 22 | SQL 层、造数回收、快照 diff |
 | `test_cli.py` | 18 | `--set` 参数映射与优先级、init 守卫与重复执行提示 |
 | `test_auth.py` | 13 | 登录引导：类型门槛、预备请求顺序、登录失败显式报错 |

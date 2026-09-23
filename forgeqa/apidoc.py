@@ -14,11 +14,18 @@
 翻译约定（JSON Schema → 造数 Schema）：
 
 - ``enum``                     → ``gen: choice``
+- ``const``                    → ``gen: const``（原样落地）
 - ``string`` + format/name 语义 → faker 各 provider / fake_phone 等脱敏生成器
+- ``string`` + pattern         → ``gen: regex``（引擎按简单正则子集展开；含分组/``|`` 时退回普通造数并标注）
 - ``string`` + minLength/maxLength → ``min_len`` / ``max_len``（同时驱动变异造数）
 - ``integer`` / ``number``     → ``gen: int`` / ``gen: float``（id 类字段用 ``gen: seq``）
 - ``boolean``                  → ``gen: bool``
-- ``object`` / ``array``       → ``gen: const`` 占位（造数引擎暂不支持嵌套生成，需人工补全）
+- ``array`` + 标量 items       → ``gen: list``（元素按 items 造数，条数取 minItems~maxItems）
+- ``object`` / ``array`` + 对象 items → ``gen: const`` 占位（造数引擎暂不支持嵌套生成，需人工补全）
+
+OpenAPI 3.1 / Pydantic v2 的写法（可选字段是 ``anyOf: [T, null]`` 而非 ``type`` + ``nullable``）
+由 :func:`_unwrap_schema` 先摊平成单类型再走上面的约定——不摊平的话 ``type`` 键缺失，
+数组和对象都会被当作普通字符串造数。
 
 因为文档里的业务约束（必填语义、枚举含义）机器读不全，产出全部定位为**草稿**：
 文件名 ``_`` 前缀保证默认 ``--cases cases`` 不会误跑，人工核对后再转正。
@@ -218,14 +225,79 @@ def _string_field(name: str, sch: dict[str, Any]) -> dict[str, Any]:
     return field_def
 
 
-def _schema_to_field(name: str, sch: dict[str, Any]) -> dict[str, Any]:
+def _unwrap_schema(sch: Any) -> dict[str, Any]:
+    """把 OpenAPI 3.1 / Pydantic v2 的联合与继承写法摊平成单类型 schema。
+
+    3.1（FastAPI 生成文档的主形态）里可选字段不是 ``type: string`` + ``nullable``，
+    而是 ``anyOf: [{type: string}, {type: null}]``；不摊平的话 ``type`` 键缺失，
+    会被当成普通字符串——数组被造成一个长单词、对象被造成一个长单词，全是错的。
+    """
     if not isinstance(sch, dict) or not sch:
+        return {}
+    out = dict(sch)
+
+    for key in ("anyOf", "oneOf"):
+        branches = out.pop(key, None)
+        if isinstance(branches, list) and branches:
+            real = [b for b in branches
+                    if not (isinstance(b, dict) and b.get("type") == "null")]
+            picked = _unwrap_schema(real[0]) if real else {}
+            for k, v in picked.items():            # 分支缺的键由外层补（外层约束更贴调用点）
+                if out.get(k) is None:
+                    out[k] = v
+
+    branches = out.pop("allOf", None)
+    if isinstance(branches, list) and branches:
+        merged: dict[str, Any] = {k: v for k, v in out.items() if k != "allOf"}
+        for b in branches:
+            for k, v in _unwrap_schema(b).items():
+                if k == "properties" and isinstance(merged.get("properties"), dict):
+                    merged["properties"] = {**v, **merged["properties"]}
+                elif k == "required" and isinstance(merged.get("required"), list):
+                    merged["required"] = list(dict.fromkeys(list(merged["required"]) + list(v)))
+                elif merged.get(k) is None:
+                    merged[k] = v
+        out = merged
+
+    t = out.get("type")
+    if isinstance(t, list):                        # 3.1 允许 type: ["string", "null"]
+        real_t = [x for x in t if x != "null"]
+        out["type"] = real_t[0] if real_t else "null"
+    return out
+
+
+#: 引擎的正则展开器只覆盖简单子集（字面量/字符类/\d\w/{n,m}/+*/?）。
+#: 出现分组或选择分支时不保证满足约束，宁可退回普通造数并标注，也不造假通过。
+_REGEX_TOO_COMPLEX = ("(", "|")
+
+
+def _schema_to_field(name: str, sch: dict[str, Any]) -> dict[str, Any]:
+    sch = _unwrap_schema(sch)
+    if not sch:
         return {"name": name, "gen": "const", "value": None}
+    if "const" in sch:
+        return {"name": name, "gen": "const", "value": sch["const"]}
     if "enum" in sch and sch["enum"]:
         return {"name": name, "gen": "choice", "values": list(sch["enum"])}
     t = sch.get("type")
+    if t == "null":
+        return {"name": name, "gen": "const", "value": None}
+    if t == "array":
+        return _array_field(name, sch)
+    if t == "object":
+        return {"name": name, "gen": "const", "value": {},
+                "description": "嵌套对象，造数引擎暂不支持自动生成，请人工补全"}
     if t == "string" or (t is None and "properties" not in sch):
-        return {"name": name, **_string_field(name, sch)}
+        out = {"name": name, **_string_field(name, sch)}
+        pat = str(sch.get("pattern", ""))
+        if pat and not any(c in pat for c in _REGEX_TOO_COMPLEX):
+            out["gen"] = "regex"                   # 引擎按简单正则子集展开，能真实满足约束
+            out["pattern"] = pat
+            out.pop("method", None)                # 换成 regex 后不再用 faker provider
+            # min_len/max_len 保留：值生成用不到，但变异造数靠它产出长度边界用例
+        elif pat:
+            out["description"] = f"文档要求满足正则 {pat}，请人工核对"
+        return out
     if t == "integer":
         out: dict[str, Any] = {"name": name, "gen": "int",
                                "min": int(sch.get("minimum", 0)),
@@ -239,15 +311,25 @@ def _schema_to_field(name: str, sch: dict[str, Any]) -> dict[str, Any]:
                 "max": float(sch.get("maximum", 9999)), "precision": 2}
     if t == "boolean":
         return {"name": name, "gen": "bool", "p": 0.5}
-    # 造数引擎暂不支持嵌套 object / array 生成，用 const 占位，人工补全
-    placeholder = [] if t == "array" else {}
-    return {"name": name, "gen": "const", "value": placeholder,
-            "description": "嵌套结构，造数引擎暂不支持自动生成，请人工补全"}
+    return {"name": name, "gen": "const", "value": None}
+
+
+def _array_field(name: str, sch: dict[str, Any]) -> dict[str, Any]:
+    """数组字段：元素可自动造数时用 ``gen: list`` 真实生成，元素是嵌套结构则占位。"""
+    item = _schema_to_field(f"{name}[i]", sch.get("items") or {})
+    if item.get("gen") == "const":
+        why = "数组元素为嵌套结构" if sch.get("items") else "数组未声明元素类型"
+        return {"name": name, "gen": "const", "value": [],
+                "description": f"{why}，造数引擎暂不支持自动生成，请人工补全"}
+    lo = max(1, int(sch.get("minItems", 1) or 1))
+    hi = max(lo, int(sch.get("maxItems", max(lo, 3)) or lo))
+    spec = {k: v for k, v in item.items() if k != "name"}
+    return {"name": name, "gen": "list", "count": [lo, hi], "item": spec}
 
 
 def schema_to_fields(entity: str, sch: dict[str, Any], spec: dict[str, Any]) -> dict[str, Any]:
     """requestBody 的 JSON Schema → ForgeQA 造数 Schema。"""
-    sch = resolve_ref(spec, sch)
+    sch = _unwrap_schema(resolve_ref(spec, sch))
     props = sch.get("properties") if isinstance(sch, dict) else None
     if not isinstance(props, dict) or not props:
         raise DataError(f"实体 {entity!r} 的请求体没有 properties 定义",
