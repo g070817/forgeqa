@@ -74,7 +74,7 @@ python -m playwright install chromium    # ← 别漏：下载浏览器内核
 | `requirements-dev.txt` | 上面 + `pytest` / `pytest-cov` | 要跑单测、改工具本身 |
 | `requirements.lock.txt` | 连传递依赖一起钉死（28 个包） | 换机器复现环境、排查环境差异 |
 
-> 本工程的锁定版本实测基线：**Python 3.13.12 / macOS arm64**，277 个单测 + 端到端套件通过。全部依赖要求 Python >= 3.10。
+> 本工程的锁定版本实测基线：**Python 3.13.12 / macOS arm64**，278 个单测 + 端到端套件通过。全部依赖要求 Python >= 3.10。
 
 **方式二：从源码安装（带 `forgeqa` 命令）**
 
@@ -181,6 +181,8 @@ forgeqa run --cases examples/selfcheck_cases
 - **不覆盖已有文件**——目标文件已存在时跳过并提示，可安全地重复执行或对半成品目录补齐。
 - `--base-url` 与 `--set` 的值会写进 `config/env.yaml` 的 `envs.<环境名>` 段（默认 `local`），与运行时 `--set` 的临时覆盖不同。
 - **有守卫**：在 ForgeQA 源码包目录内执行会被拒绝（避免污染源码树），换项目时记得 `cd` 到目标目录或用 `--root`。
+- **克隆下来的 ForgeQA 仓库里不用跑 init**：仓库自带同一套示例（`config/`、`cases/`、`examples/`），
+  在这里执行只会因「文件已存在」逐个跳过；也不会因此多出文件。
 - init 只写上面这 7 个文件，不会碰项目里的其他任何文件。
 
 ### 不想要了，怎么撤销
@@ -1015,7 +1017,7 @@ forgeqa/
 │
 ├── forgeqa/                          # 核心包 —— 换站点零改动
 │   ├── __init__.py            ( 31)  包导出
-│   ├── cli.py                (1082)  ★ 命令行入口（forgeqa 命令的执行入口）：init / scan / import / probe / gen / seed / run / inventory / db / demo
+│   ├── cli.py                (1085)  ★ 命令行入口（forgeqa 命令的执行入口）：init / scan / import / probe / gen / seed / run / inventory / db / demo
 │   ├── runner.py             (1257)  ★ 用例引擎：任务调度、变量传递、失败分拣、重试、并发——全工具的心脏
 │   ├── scan.py                (373)  站点扫描：OpenAPI 探测 / 页面爬取 / 路径字典，自动生成冒烟用例草稿
 │   ├── apidoc.py              (416)  接口文档导入：OpenAPI/Swagger → 写接口（POST）用例草稿与造数 Schema
@@ -1049,7 +1051,7 @@ forgeqa/
 │   └── selfcheck_cases/
 │       └── selfcheck_must_fail.yaml (34)  故意失败的用例，验证工具能抓出问题
 │
-├── tests/                            # 277 个单元测试，按模块拆分
+├── tests/                            # 278 个单元测试，按模块拆分
 │   ├── test_runner.py         (419)  用例引擎端到端流程
 │   ├── test_config.py         (284)  配置三层合并、插值、循环引用守卫
 │   ├── test_factory.py        (242)  造数可复现性与变异
@@ -1057,7 +1059,7 @@ forgeqa/
 │   ├── test_assertions.py     (173)  断言算子与 JSONPath
 │   ├── test_scan.py           (183)  站点扫描与用例草稿生成
 │   ├── test_apidoc.py         (322)  接口文档导入：Schema 翻译、用例生成、端到端
-│   └── test_cli.py            (130)  --set 参数映射与优先级、init 守卫
+│   └── test_cli.py            (148)  --set 参数映射与优先级、init 守卫与重复执行提示
 │
 ├── out/                              # 运行产物（报告/数据/基线/截图），已 gitignore，跑一次就有
 ├── pyproject.toml                    # 包元数据 + 依赖分组 + forgeqa 命令入口
@@ -1109,12 +1111,12 @@ cli.py ──▶ scan.py    在线爬站点 → GET 冒烟用例 + 反推 schema
 PYTHONPATH=. pytest tests -q
 ```
 
-**277 个用例**，全部通过。分布：
+**278 个用例**，全部通过。分布：
 
 | 文件 | 用例数 | 覆盖内容 |
 |---|---|---|
 | `test_assertions.py` | 65 | 断言算子、JSONPath 子集、结构校验 |
-| `test_cli.py` | 17 | `--set` 参数映射与优先级、init 守卫 |
+| `test_cli.py` | 18 | `--set` 参数映射与优先级、init 守卫与重复执行提示 |
 | `test_config.py` | 39 | 配置三层合并、变量插值、循环引用守卫 |
 | `test_db.py` | 22 | SQL 层、造数回收、快照 diff |
 | `test_factory.py` | 38 | 造数可复现性、变异、schema 反推 |

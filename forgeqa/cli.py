@@ -384,9 +384,12 @@ def cmd_init(args) -> int:
         data = deep_merge(data, patch)
         env_file.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
-    _print(f"\nForgeQA 脚手架已生成于 {root}")
-    for p in created:
-        _print(f"  + {p.relative_to(root)}")
+    if created:
+        _print(f"\nForgeQA 脚手架已生成于 {root}")
+        for p in created:
+            _print(f"  + {p.relative_to(root)}")
+    else:
+        _print(f"\n{root} 下脚手架文件均已存在，未新增任何文件（无需重复初始化）。")
     _print("""
 下一步：
   1. 编辑 config/env.yaml，把 base_url 改成你的站点

@@ -128,3 +128,21 @@ class TestInitGuard:
 
         assert cmd_init(Args()) == 2          # EXIT_USAGE
         assert "拒绝" in capsys.readouterr().out
+
+    def test_init_reports_no_new_files_when_all_exist(self, tmp_path, capsys):
+        """重复 init 时不应谎报「已生成」——全部跳过要说清楚。"""
+        from forgeqa.cli import cmd_init
+
+        class Args:
+            root = str(tmp_path)
+            set = []
+            base_url = None
+
+        assert cmd_init(Args()) == 0
+        first = capsys.readouterr().out
+        assert "已生成" in first and "+ config/env.yaml" in first
+
+        assert cmd_init(Args()) == 0          # 第二次：文件都在，全部跳过
+        second = capsys.readouterr().out
+        assert "已存在" in second and "未新增任何文件" in second
+        assert "已生成" not in second
