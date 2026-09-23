@@ -74,7 +74,7 @@ python -m playwright install chromium    # ← 别漏：下载浏览器内核
 | `requirements-dev.txt` | 上面 + `pytest` / `pytest-cov` | 要跑单测、改工具本身 |
 | `requirements.lock.txt` | 连传递依赖一起钉死（28 个包） | 换机器复现环境、排查环境差异 |
 
-> 本工程的锁定版本实测基线：**Python 3.13.12 / macOS arm64**，280 个单测 + 端到端套件通过。全部依赖要求 Python >= 3.10。
+> 本工程的锁定版本实测基线：**Python 3.13.12 / macOS arm64**，308 个单测 + 端到端套件通过。全部依赖要求 Python >= 3.10。
 
 **方式二：从源码安装（带 `forgeqa` 命令）**
 
@@ -341,18 +341,29 @@ forgeqa scan http://your-site.com          # 扫描 + 生成 schema + 生成冒�
 forgeqa scan http://your-site.com --print-only   # 先只看看，不写文件
 ```
 
-扫描走三路（质量从高到低）：
+扫描走四路（质量从高到低）：
 
 | 来源 | 做法 | 可靠度 |
 |---|---|---|
 | OpenAPI 文档 | 探测 `/openapi.json`、`/swagger.json`、`/v3/api-docs` 等 | 接口清单精确 |
+| REST 路由表 | 探测 `/?rest_route=/`、`/wp-json/`、`/routes` —— WordPress 这类框架会把接口清单作为 JSON 自描述出来 | 接口清单精确，比盲试全得多 |
 | 页面爬取 | 抓 HTML 链接/表单 + 内联 JS 里的 `/api/...` 字符串，只爬同源、限页数 | 看前端写没写 |
 | 路径字典 | `/api/users`、`/health` 等高频路径逐个 GET 试探，405+`Allow` 也能发现非 GET 接口 | 盲区最大 |
+
+> 路由表那一路是给 CMS/框架类站点准备的。WordPress 没有 OpenAPI 文档，
+> REST 根（`/?rest_route=/`）里的 `routes` 字典就等价于一份权威接口清单；
+> 朴素固定链接下必须以 `?rest_route=` 形式拼接，伪静态则走 `/wp-json`，
+> 扫描器按命中入口自动选对写法。带正则参数的模板路径（`/wp/v2/posts/(?P<id>[\d]+)`）
+> 请求不了，会被跳过——那类端点交给 `probe` 或 `import`。
 
 产出两样东西：
 
 - `config/schemas/<entity>.yaml` —— 从 JSON 响应**反推的造数 Schema**（枚举值、长度等业务约束需人工核对；目标文件已存在时不覆盖，写 `.inferred.yaml` 备份）
-- `cases/_generated/_scan_<host>.yaml` —— **可直接运行的 GET 冒烟用例** + 注释形式的 POST 草稿提示。`_` 前缀保证默认 `--cases cases` 不会误跑草稿，显式指定即可执行
+- `cases/_generated/_scan_<host>.yaml` —— 两类用例 + 注释形式的 POST 草稿提示：
+  - `GET 200` 的端点 → **可直接运行的冒烟用例**
+  - `GET 401` 的端点 → **「登录后可访问」用例**，带 `skip_if` 守卫：没配登录时如实计为「跳过」，配了登录才真正去验（见[配置](#配置envyaml-参考)里的表单登录）
+
+  `_` 前缀保证默认 `--cases cases` 不会误跑草稿，显式指定即可执行
 
 完整接入流程（换新站点时）：
 
@@ -371,9 +382,12 @@ forgeqa run --cases cases/_generated/_scan_<host>.yaml
 > [`forgeqa import`](#导入接口文档从-openapiswagger-生成-post-用例) 生成 POST 用例与造数 Schema。
 > 两者可以配合：`scan` 摸清站点有哪些接口，`import` 把写接口的请求体结构补全。
 
-已知边界：**登录墙后的接口扫不到**（先 `export FORGEQA_TOKEN=<token>` 重扫）；
-纯前端 SPA 的接口若既不在 HTML 也不在 JS 字符串里，只能靠 OpenAPI 文档或手工补充；
-扫描只能发现「接口存在」，业务规则（什么算对）永远需要人来定义。
+已知边界：**扫描本身是匿名请求**——登录墙后的接口只能摸到 401 这个状态码。若站点会
+自描述路由表（WordPress 等），清单照样能拿全，但那些端点必须先配好登录才有意义，
+所以生成的用例带了 `skip_if` 守卫，不会在匿名跑法下假装通过；需要 Bearer token 的
+站点可以先 `export FORGEQA_TOKEN=<token>` 再扫。纯前端 SPA 的接口若既不在 HTML
+也不在 JS 字符串里，只能靠 OpenAPI 文档或手工补充；扫描只能发现「接口存在」，
+业务规则（什么算对）永远需要人来定义。
 
 ---
 
@@ -561,7 +575,8 @@ priority: P0                   # P0/P1/P2/P3，决定执行顺序
 layer: api                     # api / db / ui，缺省按步骤推断
 tags: [api, smoke]             # 用于 --tags / --exclude-tags 筛选
 retries: 2                     # 用例级重试（只对环境类异常生效）
-skip: "环境未就绪"              # 跳过并记录原因
+skip: "环境未就绪"              # 无条件跳过，并记录原因
+skip_if: "${cfg.auth.type:-none} == 'none'"   # 条件跳过：表达式为真则整条跳过
 
 data:                          # 造数
   user: user.yaml                                      # 引用 schema 文件
@@ -699,12 +714,27 @@ defaults:                        # 所有环境共享，各环境只写差异
     path: ./out/forgeqa.db
     # dsn: mysql+pymysql://qa:pass@host:3306/db
   auth:
-    type: bearer                 # none | bearer | basic | header | api_key | cookie | login
+    type: login                  # none | bearer | basic | header | api_key | cookie | login
+    # login / form 型（表单登录，Cookie 留在 session 里供后续请求复用）：
+    # 引擎在每条用例开始前自动完成一次登录，不用写 setup 步骤。
+    #   prepare —— 登录前的预备请求：拿 CSRF token / test cookie，
+    #              比如 WordPress 强制校验 wordpress_test_cookie，缺了直接拒登；
+    #   expect  —— 校验登录结果，不符即显式报错（否则会带着匿名身份继续跑，
+    #              把后面的 401 误判成「接口坏了」）。
     login:
+      prepare: [{method: GET, path: /wp-login.php}]
       method: POST
-      path: /api/login
-      json: {username: "${os:QA_USER:-admin}", password: "${os:QA_PASS:-admin123}"}
-      extract: {token: "$.data.token"}
+      path: /wp-login.php
+      data: {log: "${os:WP_USER:-admin}", pwd: "${os:WP_PASS:-UNSET}",
+             wp-submit: "Log In", testcookie: "1"}
+      expect: {status: 302}
+    # bearer 型则把 token 抽进变量池复用（其他用例可直接 ${ctx.token}）：
+    #   type: bearer
+    #   login:
+    #     method: POST
+    #     path: /api/login
+    #     json: {username: "${os:QA_USER:-admin}", password: "${os:QA_PASS:-admin123}"}
+    #     extract: {token: "$.data.token"}
 
 generators:
   locale: zh_CN
@@ -893,7 +923,7 @@ assert:
 
 ```
 forgeqa init        生成项目脚手架（config / schemas / cases / ddl）
-forgeqa scan        扫描站点发现接口，生成冒烟用例草稿与造数 schema
+forgeqa scan        扫描站点发现接口（含 REST 路由表），生成冒烟 + 登录守卫用例与造数 schema
 forgeqa import      从 OpenAPI/Swagger 接口文档生成 POST 用例草稿与造数 schema
 forgeqa probe       探测接口，从真实响应反推造数 schema
 forgeqa gen         生成数据集（正常 + 边界/异常/极端变异）
@@ -1026,15 +1056,15 @@ forgeqa/
 │
 ├── forgeqa/                          # 核心包 —— 换站点零改动
 │   ├── __init__.py            ( 31)  包导出
-│   ├── cli.py                (1085)  ★ 命令行入口（forgeqa 命令的执行入口）：init / scan / import / probe / gen / seed / run / inventory / db / demo
-│   ├── runner.py             (1257)  ★ 用例引擎：任务调度、变量传递、失败分拣、重试、并发——全工具的心脏
-│   ├── scan.py                (373)  站点扫描：OpenAPI 探测 / 页面爬取 / 路径字典，自动生成冒烟用例草稿
+│   ├── cli.py                (1088)  ★ 命令行入口（forgeqa 命令的执行入口）：init / scan / import / probe / gen / seed / run / inventory / db / demo
+│   ├── runner.py             (1271)  ★ 用例引擎：任务调度、变量传递、失败分拣、重试、并发——全工具的心脏
+│   ├── scan.py                (497)  站点扫描：OpenAPI / REST 路由表 / 页面爬取 / 路径字典四路发现接口，生成冒烟与「登录后可访问」用例草稿
 │   ├── apidoc.py              (416)  接口文档导入：OpenAPI/Swagger → 写接口（POST）用例草稿与造数 Schema
 │   ├── config.py              (549)  多环境配置 + ${} 模板引擎 + 变量池 + raw←env←overrides 三层合并
 │   ├── factory.py             (788)  造数引擎：Faker / 派生字段 / 边界·异常·极端变异 / schema 反推
-│   ├── httpclient.py          (571)  requests 封装：变量提取、重试退避、基线录制、代理绕过
+│   ├── httpclient.py          (616)  requests 封装：变量提取、重试退避、基线录制、代理绕过、登录引导
 │   ├── db.py                  (561)  SQL 层：SQLite 零依赖 / SQLAlchemy 双驱动、精确回收、快照 diff
-│   ├── uiauto.py              (611)  Playwright 声明式 DSL：多策略选择器、视觉像素回归
+│   ├── uiauto.py              (664)  Playwright 声明式 DSL：多策略选择器、填值读回校验、视觉像素回归
 │   ├── assertions.py          (412)  35+ 断言算子 + 自研 JSONPath 子集 + 结构校验（接口/SQL/UI 共用）
 │   ├── report.py              (420)  自包含 HTML 报告（截图内嵌）+ JUnit XML + 失败根因四分类
 │   └── errors.py              ( 64)  统一异常体系，每个异常自带 hint 修复建议
@@ -1060,16 +1090,17 @@ forgeqa/
 │   └── selfcheck_cases/
 │       └── selfcheck_must_fail.yaml (34)  故意失败的用例，验证工具能抓出问题
 │
-├── tests/                            # 280 个单元测试，按模块拆分
+├── tests/                            # 308 个单元测试，按模块拆分
 │   ├── test_runner.py         (419)  用例引擎端到端流程
-│   ├── test_config.py         (284)  配置三层合并、插值、循环引用守卫
+│   ├── test_config.py         (308)  配置三层合并、插值、循环引用守卫
 │   ├── test_factory.py        (242)  造数可复现性与变异
 │   ├── test_db.py             (186)  SQL 层与回收
 │   ├── test_assertions.py     (173)  断言算子与 JSONPath
-│   ├── test_scan.py           (183)  站点扫描与用例草稿生成
+│   ├── test_scan.py           (252)  站点扫描、REST 路由表发现、用例草稿生成
 │   ├── test_apidoc.py         (322)  接口文档导入：Schema 翻译、用例生成、端到端
 │   ├── test_cli.py            (148)  --set 参数映射与优先级、init 守卫与重复执行提示
-│   └── test_uiauto.py          (78)  UI 定位等待状态（需本机 chromium，无则跳过）
+│   ├── test_auth.py           (100)  登录引导：类型门槛、预备请求顺序、失败显式报错
+│   └── test_uiauto.py         (132)  UI 定位等待状态与 fill 读回校验（需本机 chromium，无则跳过）
 │
 ├── out/                              # 运行产物（报告/数据/基线/截图），已 gitignore，跑一次就有
 ├── pyproject.toml                    # 包元数据 + 依赖分组 + forgeqa 命令入口
@@ -1099,7 +1130,7 @@ cli.py ──▶ runner.py（引擎）
 **两个「先跑一次就少写一堆 YAML」的辅助入口**（出用例，不出判定）：
 
 ```
-cli.py ──▶ scan.py    在线爬站点 → GET 冒烟用例 + 反推 schema（POST 只能留草稿提示）
+cli.py ──▶ scan.py    在线探站点 → 冒烟用例 + 登录守卫用例 + 反推 schema（POST 只能留草稿提示）
            apidoc.py  读接口文档 → POST 用例 + 造数 schema（请求体结构来自文档，最准）
 ```
 
@@ -1121,18 +1152,19 @@ cli.py ──▶ scan.py    在线爬站点 → GET 冒烟用例 + 反推 schema
 PYTHONPATH=. pytest tests -q
 ```
 
-**280 个用例**，全部通过。分布：
+**308 个用例**，全部通过。分布：
 
 | 文件 | 用例数 | 覆盖内容 |
 |---|---|---|
 | `test_assertions.py` | 65 | 断言算子、JSONPath 子集、结构校验 |
-| `test_cli.py` | 18 | `--set` 参数映射与优先级、init 守卫与重复执行提示 |
-| `test_config.py` | 39 | 配置三层合并、变量插值、循环引用守卫 |
-| `test_db.py` | 22 | SQL 层、造数回收、快照 diff |
+| `test_scan.py` | 45 | 站点扫描、REST 路由表展开、schema 反推写入、用例草稿生成 |
+| `test_config.py` | 41 | 配置三层合并、变量插值、循环引用守卫 |
+| `test_runner.py` | 39 | 用例引擎端到端流程、`skip_if` 条件跳过 |
 | `test_factory.py` | 38 | 造数可复现性、变异、schema 反推 |
-| `test_runner.py` | 39 | 用例引擎端到端流程 |
-| `test_scan.py` | 32 | 站点扫描、schema 反推写入、用例草稿生成 |
 | `test_apidoc.py` | 25 | 文档加载、$ref 解析、Schema 翻译、导入端到端 |
-| `test_uiauto.py` | 2 | UI 定位等待状态：fill 不被 autofocus 脚本抢走（无 chromium 自动跳过） |
+| `test_db.py` | 22 | SQL 层、造数回收、快照 diff |
+| `test_cli.py` | 18 | `--set` 参数映射与优先级、init 守卫与重复执行提示 |
+| `test_auth.py` | 13 | 登录引导：类型门槛、预备请求顺序、登录失败显式报错 |
+| `test_uiauto.py` | 4 | UI 定位等待状态、fill 读回校验：值被 autofocus 类脚本抢走时自动重填（无 chromium 自动跳过） |
 
 不依赖网络与外部服务（SQLite + 合成响应）；`test_uiauto.py` 需要本机浏览器，缺省自动跳过。

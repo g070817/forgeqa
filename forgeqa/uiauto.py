@@ -301,10 +301,53 @@ class UiDriver:
         return "dblclicked"
 
     def do_fill(self, spec: Mapping[str, Any]) -> str:
+        """填入值并**读回校验**。
+
+        页面脚本可能在 fill 的「聚焦」与「赋值」之间抢走焦点——WordPress 登录页的
+        ``wp_attempt_focus()`` 就是典型：它在 200ms 后清空并聚焦账号框，于是紧接着
+        给密码框填的值会落进账号框。只把定位等待改成 visible 挡不住这种竞态（它发生在
+        fill 内部），所以填完必须读回；不一致就重填——这类脚本只跑一次，第二次必中。
+        """
         loc = self.locate(_kw(spec, "target") or _kw(spec, "selector"))
         value = "" if spec.get("value") is None else str(self.ctx.resolve(spec["value"]))
-        loc.fill(value, timeout=int(spec.get("timeout", self.timeout)))
+        timeout = int(spec.get("timeout", self.timeout))
+        actual: str | None = None
+        for attempt in range(max(1, int(spec.get("verify_attempts", 2)))):
+            if attempt:
+                # 重填不再走 fill()：它内部靠 insertText，还是依赖焦点，会被同一个
+                # 脚本再次干扰。改用 DOM 直写，把值写进目标元素本身，竞态免疫。
+                self._set_value_direct(loc, value)
+            else:
+                loc.fill(value, timeout=timeout)
+            actual = self._read_back(loc)
+            if actual is None or actual == value:
+                break
+        if actual is not None and actual != value:
+            raise UiError(
+                f"填入后值对不上：期望 {value!r}，实际 {actual!r}",
+                hint="页面脚本可能在填值中途抢走了焦点；可给该步骤加 verify_attempts: 3，"
+                     "或在 fill 前补一个 wait_for 让页面先稳定下来",
+            )
         return f"filled({value[:40]})"
+
+    def _read_back(self, loc) -> str | None:
+        """读回输入框的值；控件不支持读取（非 input/textarea）时返回 None。"""
+        try:
+            return loc.input_value(timeout=1200)
+        except Exception:
+            return None
+
+    def _set_value_direct(self, loc, value: str) -> None:
+        """绕开焦点机制直接给元素设值（autofocus 抢焦点对它免疫）。
+
+        只用于 fill 校验失败后的重填：原生 fill 依赖焦点（insertText），
+        而 DOM 直写把值写到目标元素上，与「当前焦点在哪」无关。
+        """
+        loc.evaluate(
+            "(el, v) => { el.value = v;"
+            " el.dispatchEvent(new Event('input', {bubbles: true})); }",
+            value,
+        )
 
     def do_type(self, spec: Mapping[str, Any]) -> str:
         loc = self.locate(_kw(spec, "target"))
