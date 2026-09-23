@@ -73,6 +73,15 @@ _HREF_RE = re.compile(r"""(?:href|action|src)\s*=\s*["']([^"']+)["']""", re.I)
 _JS_API_RE = re.compile(r"""["'](/(?:api|v\d)(?:/[A-Za-z0-9_\-{}.:$?=&]+)+)["']""")
 
 _HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
+
+#: 生成用例的鉴权守卫：文档/探测显示「需登录」的接口，当前配置没配 auth 时整条跳过。
+#:
+#: 为什么默认值写 ``unset`` 而不是直觉上的 ``none``：``${x:-none}`` 里的默认值会过
+#: ``coerce_scalar``，「none」是 YAML 的 null 写法，会被转成 Python ``None``，
+#: 于是 ``None == 'none'`` 恒假，守卫静默失效。``unset`` 不带这层歧义。
+#:
+#: 语义是「没配鉴权 → 跳过」，所以 ``type: none`` 与未配置同样算跳过。
+AUTH_GUARD = "${cfg.auth.type:-unset} in ('none', 'unset')"
 _MAX_SAMPLE_BYTES = 200_000      # 超大响应不作为 schema 反推样本
 _MAX_PATH_LEN = 120
 
@@ -215,7 +224,7 @@ def build_case_docs(result: ScanResult) -> list[dict[str, Any]]:
                 "tags": ["scan", "auth"],
                 # 用用例级条件跳过（而非步骤级 if）：报告里如实计为「跳过」，
                 # 而不是「0 个步骤全部不执行」导致的假通过
-                "skip_if": "${cfg.auth.type:-none} == 'none'",
+                "skip_if": AUTH_GUARD,
                 "steps": [{
                     "name": f"GET {ep.path}（需登录态）",
                     "http": {"method": "GET", "path": ep.path},

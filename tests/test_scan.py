@@ -9,6 +9,7 @@ import yaml
 from forgeqa.errors import CaseError
 from forgeqa.runner import load_cases
 from forgeqa.scan import (
+    AUTH_GUARD,
     Endpoint,
     ScanResult,
     build_case_docs,
@@ -147,7 +148,7 @@ class TestCaseDocsForAuthEndpoints:
         """需要登录的端点也要出用例，并且必须带条件跳过——
         没配凭证时老实显示「跳过」，而不是 0 步骤的假通过。"""
         doc = build_case_docs(self._result(401))[0]
-        assert doc["skip_if"] == "${cfg.auth.type:-none} == 'none'"
+        assert doc["skip_if"] == AUTH_GUARD
         assert doc["steps"][0]["assert"] == [{"status": 200}]
 
     def test_200_stays_anonymous_smoke(self):

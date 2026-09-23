@@ -18,9 +18,11 @@ from forgeqa.apidoc import (
     resolve_ref,
     schema_to_fields,
 )
+from forgeqa.config import ForgeConfig
 from forgeqa.errors import CaseError, DataError
 from forgeqa.factory import Context, DataFactory
-from forgeqa.runner import load_cases
+from forgeqa.runner import _eval_condition, load_cases
+from forgeqa.scan import AUTH_GUARD
 
 
 # --------------------------------------------------------------------------- #
@@ -440,3 +442,145 @@ class TestOperation:
         # operationId 仅在路径推导不出实体时使用
         assert Operation(path="/", method="POST", op_id="createOrder").entity == "createorder"
         assert Operation(path="/x", method="POST", op_id="createOrder").entity == "x"
+
+
+# --------------------------------------------------------------------------- #
+# 鉴权守卫：文档 security → 生成用例的 skip_if
+# --------------------------------------------------------------------------- #
+def _auth_spec(security_op=None, security_root=None) -> dict:
+    """一份带 security 的最小文档：/api/open 公开，/api/secret 需鉴权。"""
+    spec: dict = {
+        "openapi": "3.1.0",
+        "info": {"title": "auth demo", "version": "1"},
+        "paths": {
+            "/api/open": {"get": {"operationId": "open"}},
+            "/api/secret": {"get": {"operationId": "secret"}},
+            "/api/secret/items": {
+                "post": {
+                    "operationId": "createItem",
+                    "requestBody": {"content": {"application/json": {
+                        "schema": {"type": "object",
+                                   "properties": {"name": {"type": "string"}},
+                                   "required": ["name"]}}}},
+                },
+            },
+        },
+    }
+    if security_op is not None:
+        spec["paths"]["/api/secret"]["get"]["security"] = security_op
+    if security_root is not None:
+        spec["security"] = security_root
+    return spec
+
+
+class TestNeedsAuthDetection:
+    def test_operation_level_security(self):
+        ops = {o.path: o for o in iter_operations(_auth_spec(security_op=[{"HTTPBearer": []}]))}
+        assert ops["/api/secret"].needs_auth is True
+        assert ops["/api/open"].needs_auth is False
+
+    def test_global_security_is_inherited(self):
+        ops = {o.path: o for o in iter_operations(_auth_spec(security_root=[{"HTTPBearer": []}]))}
+        assert ops["/api/secret"].needs_auth is True
+        assert ops["/api/open"].needs_auth is True
+
+    def test_empty_security_opts_out_of_global(self):
+        """`security: []` 是「本接口公开」的显式声明，不能被全文级覆盖。"""
+        spec = _auth_spec(security_op=[], security_root=[{"HTTPBearer": []}])
+        ops = {o.path: o for o in iter_operations(spec)}
+        assert ops["/api/secret"].needs_auth is False
+        assert ops["/api/open"].needs_auth is True
+
+    def test_no_security_anywhere(self):
+        ops = {o.path: o for o in iter_operations(_auth_spec())}
+        assert not any(o.needs_auth for o in ops.values())
+
+
+class TestAuthGuardEmission:
+    """没配 auth 时，需鉴权的生成用例必须整条跳过，而不是假通过。"""
+
+    def _docs(self, spec):
+        return build_import_docs(iter_operations(spec), spec, "authdemo")[0]
+
+    @staticmethod
+    def _path(doc: dict) -> str:
+        """取用例打的目标路径：普通步骤在 step.http，变异用例嵌在 loop.steps[0]。"""
+        step = doc["steps"][0]
+        if "http" in step:
+            return step["http"]["path"]
+        return step["loop"]["steps"][0]["http"]["path"]
+
+    def test_guarded_cases_carry_skip_if(self):
+        docs = self._docs(_auth_spec(security_root=[{"HTTPBearer": []}]))
+        guarded = [d for d in docs if d.get("skip_if")]
+        assert guarded, "文档标了 security，生成用例必须带守卫"
+        assert all(d["skip_if"] == AUTH_GUARD for d in guarded)
+        # 守卫要覆盖该接口的全部生成用例（GET 冒烟 + POST 正常路径 + 变异）
+        paths = {self._path(d) for d in guarded}
+        assert {"/api/secret", "/api/secret/items"} <= paths
+
+    def test_public_cases_have_no_guard(self):
+        docs = self._docs(_auth_spec(security_op=[{"HTTPBearer": []}]))
+        open_docs = [d for d in docs if self._path(d) == "/api/open"]
+        assert open_docs and all("skip_if" not in d for d in open_docs)
+
+    def test_none_needs_auth_means_no_guard_anywhere(self):
+        docs = self._docs(_auth_spec())
+        assert all("skip_if" not in d for d in docs)
+
+    def test_guard_survives_roundtrip_into_case_file(self, tmp_path):
+        """守卫要真的落进 YAML 并被用例加载器读出来。"""
+        spec = _auth_spec(security_root=[{"HTTPBearer": []}])
+        result = import_spec(spec, name="authdemo",
+                             cases_dir=tmp_path / "c", schemas_dir=tmp_path / "s")
+        cases = load_cases([str(result.case_file)], tmp_path)
+        assert cases and all(c.skip_if for c in cases)
+        assert all(c.skip_if == AUTH_GUARD for c in cases)
+
+    # ------------------------------------------------------------------ #
+    # 求值层面：守卫必须真的「为真」，只比字符串是抓不到 bug 的
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _config(tmp_path, env_yaml: str, env: str = "local"):
+        (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "config" / "env.yaml").write_text(env_yaml, encoding="utf-8")
+        return ForgeConfig.load(tmp_path / "config" / "env.yaml", env=env, root=tmp_path)
+
+    #: 最常见的写法：auth 挂在 defaults 下面（不是顶层）
+    _AUTH_IN_DEFAULTS = """
+default_env: local
+defaults:
+  auth:
+    type: {kind}
+envs:
+  local:
+    base_url: http://127.0.0.1:8080
+"""
+
+    def test_truthy_when_auth_written_under_defaults(self, tmp_path):
+        """回归锁：auth 写在 defaults 下时 ${cfg.auth.type} 必须取得到值。
+
+        原先 cfg 层只挂配置文件顶层，取不到的后果不是「取到默认值」而是
+        `None == 'none'` 恒假 —— 守卫静默失效，整批用例照跑并报一堆 401。
+        """
+        cfg = self._config(tmp_path, self._AUTH_IN_DEFAULTS.format(kind="none"))
+        assert _eval_condition(cfg.context(), AUTH_GUARD) is True
+
+    def test_falsy_when_auth_configured(self, tmp_path):
+        cfg = self._config(tmp_path, self._AUTH_IN_DEFAULTS.format(kind="bearer"))
+        assert _eval_condition(cfg.context(), AUTH_GUARD) is False
+
+    def test_truthy_when_auth_absent_entirely(self, tmp_path):
+        cfg = self._config(tmp_path, "default_env: local\nenvs:\n  local:\n"
+                                     "    base_url: http://127.0.0.1:8080\n")
+        assert _eval_condition(cfg.context(), AUTH_GUARD) is True
+
+    def test_auth_set_by_cli_override(self, tmp_path):
+        """--set auth.type=bearer 也要能让守卫放行（走 CLI 的真实解析路径）。"""
+        from forgeqa.cli import _overrides
+
+        self._config(tmp_path, "default_env: local\nenvs:\n  local:\n"
+                               "    base_url: http://127.0.0.1:8080\n")
+        cfg = ForgeConfig.load(tmp_path / "config" / "env.yaml", env="local",
+                               overrides=_overrides(["auth.type=bearer"]), root=tmp_path)
+        assert _eval_condition(cfg.context(), AUTH_GUARD) is False

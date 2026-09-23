@@ -74,7 +74,7 @@ python -m playwright install chromium    # ← 别漏：下载浏览器内核
 | `requirements-dev.txt` | 上面 + `pytest` / `pytest-cov` | 要跑单测、改工具本身 |
 | `requirements.lock.txt` | 连传递依赖一起钉死（28 个包） | 换机器复现环境、排查环境差异 |
 
-> 本工程的锁定版本实测基线：**Python 3.13.12 / macOS arm64**，323 个单测 + 端到端套件通过。全部依赖要求 Python >= 3.10。
+> 本工程的锁定版本实测基线：**Python 3.13.12 / macOS arm64**，340 个单测 + 端到端套件通过。全部依赖要求 Python >= 3.10。
 
 **方式二：从源码安装（带 `forgeqa` 命令）**
 
@@ -466,6 +466,36 @@ POST 边界变异（边界 + 异常两类变异数据逐条打接口，断言不
 数组、多层对象（如 Open WebUI 的 `OLLAMA_API_CONFIGS`）都落在这一类；含分组或 `|` 的正则
 不硬凑，退回普通造数并在字段上标注，避免生成"看着像"却不满足约束的值。
 
+### 生成用例的鉴权守卫
+
+文档里标了 `security` 的操作（操作级优先，未声明则继承全文级；显式写 `security: []`
+表示本接口公开），其生成用例会带一条 `skip_if` 守卫：
+
+```yaml
+skip_if: "${cfg.auth.type:-unset} in ('none', 'unset')"   # 没配 auth 时整条跳过
+```
+
+为什么必须有这道守卫——不加的话，未鉴权跑一遍是**双输**的：
+
+| 用例类型 | 无守卫时的表现 | 有守卫时 |
+|---|---|---|
+| GET 冒烟（断言 `status: 200`） | 401 打成红灯，**噪音淹没真问题** | 如实计为「跳过」 |
+| POST 正常路径 / 变异（断言「不出现 5xx」） | 401 落在宽断言区间内，**算通过**（假绿，最危险） | 如实计为「跳过」 |
+
+配了 `auth`（`type` 不是 `none`）之后守卫自动放行，这些用例才会真正去验。所以
+**先配鉴权再跑**，能一次性把公开接口与需鉴权接口都覆盖到：
+
+```bash
+forgeqa run --cases cases/_generated/_import_myproject.yaml            # 只剩公开接口真跑
+forgeqa run --cases cases/_generated/_import_myproject.yaml --env with-login   # 鉴权接口一起验
+```
+
+> 守卫是**保守**的：它只看「有没有配 auth」，不判断这个 token 是否有效。token 过期或
+> 权限不足时，用例照常执行并如实失败——这正是你要的信号，而不是被守卫藏起来。
+> 这条 `skip_if` 表达式与 `scan` 共用一份定义（`scan.AUTH_GUARD`），自定义用例请引用它，
+> 不要另写一份。注意默认值写 `unset` 而非 `none`：`${x:-none}` 的默认值会过 YAML
+> 标量转换，`none` 被转成 Python `None`，`None == 'none'` 恒假会让守卫静默失效。
+
 完整流程（拿到接口文档时）：
 
 ```bash
@@ -475,8 +505,9 @@ forgeqa import ./openapi.yaml --name myproject
 # 2. 人工核对 config/schemas/*.yaml 的枚举含义、必填语义、长度上限，
 #    并给唯一字段（用户名/邮箱）加 transform: "suffix:${uniq}" 防撞车
 
-# 3. 运行生成的草稿
+# 3. 运行生成的草稿（需鉴权的接口默认以「跳过」呈现，配了 auth 才真跑）
 forgeqa run --cases cases/_generated/_import_myproject.yaml
+forgeqa run --cases cases/_generated/_import_myproject.yaml --env with-login   # 带上登录态
 
 # 4. 把通过的草稿转正：去掉文件名的 _ 前缀、按业务补 SQL/UI 断言后移入 cases/
 ```
@@ -752,6 +783,13 @@ defaults:                        # 所有环境共享，各环境只写差异
     #     path: /api/login
     #     json: {username: "${os:QA_USER:-admin}", password: "${os:QA_PASS:-admin123}"}
     #     extract: {token: "$.data.token"}
+    #
+    # 凭证插值：auth 段整体过一遍 ${} 模板，token / username / password / value
+    # 都能写 ${os:XXX}（凭证不进仓库）。`type: basic` 的 username/password 同样支持。
+    # 别把 `${os:WP_PASS:-UNSET}` 的默认值写成空串或 none ——
+    #   * 空串：`${os:X:-}` 得到的是 None 而非 ''，`!= ''` 守卫会恒真；
+    #   * none：会被 YAML 标量转换吃成 Python None，`== 'none'` 同样恒真。
+    # 用一个不会与真实值混淆的哨兵（如 UNSET）最稳。
 
 generators:
   locale: zh_CN
@@ -1075,11 +1113,11 @@ forgeqa/
 │   ├── __init__.py            ( 31)  包导出
 │   ├── cli.py                (1088)  ★ 命令行入口（forgeqa 命令的执行入口）：init / scan / import / probe / gen / seed / run / inventory / db / demo
 │   ├── runner.py             (1271)  ★ 用例引擎：任务调度、变量传递、失败分拣、重试、并发——全工具的心脏
-│   ├── scan.py                (497)  站点扫描：OpenAPI / REST 路由表 / 页面爬取 / 路径字典四路发现接口，生成冒烟与「登录后可访问」用例草稿
-│   ├── apidoc.py              (490)  接口文档导入：OpenAPI 3.0/3.1 与 Swagger 2 → 写接口（POST）用例草稿与造数 Schema
-│   ├── config.py              (549)  多环境配置 + ${} 模板引擎 + 变量池 + raw←env←overrides 三层合并
+│   ├── scan.py                (506)  站点扫描：OpenAPI / REST 路由表 / 页面爬取 / 路径字典四路发现接口，生成冒烟与「登录后可访问」用例草稿
+│   ├── apidoc.py              (512)  接口文档导入：OpenAPI 3.0/3.1 与 Swagger 2 → 写接口（POST）用例草稿与造数 Schema，含鉴权守卫
+│   ├── config.py              (558)  多环境配置 + ${} 模板引擎 + 变量池 + raw←env←overrides 三层合并
 │   ├── factory.py             (788)  造数引擎：Faker / 派生字段 / 边界·异常·极端变异 / schema 反推
-│   ├── httpclient.py          (616)  requests 封装：变量提取、重试退避、基线录制、代理绕过、登录引导
+│   ├── httpclient.py          (620)  requests 封装：变量提取、重试退避、基线录制、代理绕过、登录引导
 │   ├── db.py                  (561)  SQL 层：SQLite 零依赖 / SQLAlchemy 双驱动、精确回收、快照 diff
 │   ├── uiauto.py              (664)  Playwright 声明式 DSL：多策略选择器、填值读回校验、视觉像素回归
 │   ├── assertions.py          (412)  35+ 断言算子 + 自研 JSONPath 子集 + 结构校验（接口/SQL/UI 共用）
@@ -1107,16 +1145,16 @@ forgeqa/
 │   └── selfcheck_cases/
 │       └── selfcheck_must_fail.yaml (34)  故意失败的用例，验证工具能抓出问题
 │
-├── tests/                            # 323 个单元测试，按模块拆分
+├── tests/                            # 340 个单元测试，按模块拆分
 │   ├── test_runner.py         (419)  用例引擎端到端流程
 │   ├── test_config.py         (308)  配置三层合并、插值、循环引用守卫
 │   ├── test_factory.py        (242)  造数可复现性与变异
 │   ├── test_db.py             (186)  SQL 层与回收
 │   ├── test_assertions.py     (173)  断言算子与 JSONPath
-│   ├── test_scan.py           (252)  站点扫描、REST 路由表发现、用例草稿生成
-│   ├── test_apidoc.py         (442)  接口文档导入：Schema 翻译、3.1 联合类型摊平、用例生成、端到端
+│   ├── test_scan.py           (253)  站点扫描、REST 路由表发现、用例草稿生成
+│   ├── test_apidoc.py         (586)  接口文档导入：Schema 翻译、3.1 联合类型摊平、鉴权守卫生成、端到端
 │   ├── test_cli.py            (148)  --set 参数映射与优先级、init 守卫与重复执行提示
-│   ├── test_auth.py           (100)  登录引导：类型门槛、预备请求顺序、失败显式报错
+│   ├── test_auth.py           (153)  登录引导：类型门槛、预备请求顺序、失败显式报错、凭证插值
 │   └── test_uiauto.py         (132)  UI 定位等待状态与 fill 读回校验（需本机 chromium，无则跳过）
 │
 ├── out/                              # 运行产物（报告/数据/基线/截图），已 gitignore，跑一次就有
@@ -1169,19 +1207,19 @@ cli.py ──▶ scan.py    在线探站点 → 冒烟用例 + 登录守卫用�
 PYTHONPATH=. pytest tests -q
 ```
 
-**323 个用例**，全部通过。分布：
+**340 个用例**，全部通过。分布：
 
 | 文件 | 用例数 | 覆盖内容 |
 |---|---|---|
 | `test_assertions.py` | 65 | 断言算子、JSONPath 子集、结构校验 |
+| `test_apidoc.py` | 50 | 文档加载、$ref 解析、Schema 翻译、3.1 联合类型/`const`/`pattern`/数组、鉴权守卫生成与真求值、导入端到端 |
 | `test_scan.py` | 45 | 站点扫描、REST 路由表展开、schema 反推写入、用例草稿生成 |
 | `test_config.py` | 41 | 配置三层合并、变量插值、循环引用守卫 |
 | `test_runner.py` | 39 | 用例引擎端到端流程、`skip_if` 条件跳过 |
 | `test_factory.py` | 38 | 造数可复现性、变异、schema 反推 |
-| `test_apidoc.py` | 38 | 文档加载、$ref 解析、Schema 翻译、3.1 联合类型/`const`/`pattern`/数组、导入端到端 |
 | `test_db.py` | 22 | SQL 层、造数回收、快照 diff |
 | `test_cli.py` | 18 | `--set` 参数映射与优先级、init 守卫与重复执行提示 |
-| `test_auth.py` | 13 | 登录引导：类型门槛、预备请求顺序、登录失败显式报错 |
+| `test_auth.py` | 18 | 登录引导：类型门槛、预备请求顺序、失败显式报错、`auth` 段凭证插值 |
 | `test_uiauto.py` | 4 | UI 定位等待状态、fill 读回校验：值被 autofocus 类脚本抢走时自动重填（无 chromium 自动跳过） |
 
 不依赖网络与外部服务（SQLite + 合成响应）；`test_uiauto.py` 需要本机浏览器，缺省自动跳过。

@@ -42,7 +42,7 @@ import requests
 import yaml
 
 from .errors import DataError
-from .scan import entity_for
+from .scan import AUTH_GUARD, entity_for
 
 # --------------------------------------------------------------------------- #
 # 数据结构
@@ -57,6 +57,7 @@ class Operation:
     summary: str = ""
     body_schema: dict[str, Any] | None = None   # application/json 请求体 schema（$ref 已解析）
     path_params: list[str] = field(default_factory=list)
+    needs_auth: bool = False          # 文档标了 security（操作级或全文级）
 
     @property
     def entity(self) -> str:
@@ -170,12 +171,17 @@ def iter_operations(spec: dict[str, Any]) -> list[Operation]:
                         break
             params = [p.get("name") for p in resolve_ref(spec, op.get("parameters")) or []
                       if isinstance(p, dict) and p.get("in") == "path" and p.get("name")]
+            # 鉴权要求：操作级 security 优先，未声明则继承全文级。
+            # 显式写 `security: []` 表示「本接口公开」，不能被全文级覆盖。
+            op_sec = op.get("security")
+            needs_auth = bool(spec.get("security")) if op_sec is None else bool(op_sec)
             ops.append(Operation(
                 path=str(path), method=key.upper(),
                 op_id=str(op.get("operationId") or ""),
                 summary=str(op.get("summary") or op.get("description") or ""),
                 body_schema=body_schema,
                 path_params=sorted(set(path_params) | {p for p in path_params if p in str(path)}),
+                needs_auth=needs_auth,
             ))
     # 路径模板里的 {id} 本身就是路径参数
     for op in ops:
@@ -357,6 +363,10 @@ def build_import_docs(ops: list[Operation], spec: dict[str, Any], name: str) \
         -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]], list[str]]:
     """返回 (可执行用例, {实体名: 造数schema}, 注释草稿行)。
 
+    文档标了 ``security`` 的操作（``needs_auth``），其生成用例统一加
+    ``scan.AUTH_GUARD`` 守卫：没配 auth 时整条跳过，而不是被 401 打成红灯
+    （GET 冒烟）或被宽断言算成通过（POST，假绿，最危险）。
+
     可执行：POST 无路径参数（正常路径 + 边界变异）、GET 无路径参数（冒烟）。
     草稿：带路径参数的写接口、PUT/PATCH/DELETE。
     """
@@ -374,6 +384,7 @@ def build_import_docs(ops: list[Operation], spec: dict[str, Any], name: str) \
         return final
 
     for op in sorted(ops, key=lambda o: (o.path, o.method)):
+        mark = len(docs)                     # 本次循环新增的用例起点，循环末尾统一加守卫
         if op.method == "POST" and not op.has_path_param and op.body_schema:
             entity = unique_entity(op)
             try:
@@ -447,6 +458,9 @@ def build_import_docs(ops: list[Operation], spec: dict[str, Any], name: str) \
             drafts.append(f"# {op.method} {op.path}"
                           + (f"  （{why}）" if why else "")
                           + (f"  {op.summary}" if op.summary else ""))
+        if op.needs_auth:
+            for doc in docs[mark:]:
+                doc["skip_if"] = AUTH_GUARD
     return docs, schemas, drafts
 
 
