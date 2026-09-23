@@ -97,6 +97,9 @@ class UiDriver:
         self.logger = logger
         self.timeout = int(self.opts.get("timeout", 15000))
         self.headless = bool(self.opts.get("headless", True))
+        # slow_mo：Playwright 原生参数，每个动作（点击/填值/导航）之间强制间隔 N 毫秒。
+        # 有头模式（headless: false）想「看着执行」时必须配它，否则浏览器一闪就跑完。
+        self.slow_mo = max(0, int(self.opts.get("slow_mo", 0)))
         self.browser_name = str(self.opts.get("browser", "chromium"))
         self.viewport = dict(self.opts.get("viewport") or {"width": 1440, "height": 900})
         self.screenshot_on_fail = bool(self.opts.get("screenshot_on_fail", True))
@@ -120,11 +123,18 @@ class UiDriver:
                 hint="pip install playwright && playwright install chromium",
             ) from exc
         self._pw = sync_playwright().start()
+        return self._launch()
+
+    def _launch(self) -> "UiDriver":
+        """start() 的后半段：启动浏览器并建会话。独立成方法，便于测试
+        捕获 launch_kwargs（配置了 slow_mo 却没生效是最坑的假象）。"""
         launcher = getattr(self._pw, self.browser_name, None)
         if launcher is None:
             raise UiError(f"不支持的浏览器 {self.browser_name!r}",
                           hint="可用: chromium / firefox / webkit")
         launch_kwargs: dict[str, Any] = {"headless": self.headless}
+        if self.slow_mo:
+            launch_kwargs["slow_mo"] = self.slow_mo
         if self.browser_name == "chromium":
             launch_kwargs["args"] = ["--disable-blink-features=AutomationControlled"]
         try:

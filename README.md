@@ -74,7 +74,7 @@ python -m playwright install chromium    # ← 别漏：下载浏览器内核
 | `requirements-dev.txt` | 上面 + `pytest` / `pytest-cov` | 要跑单测、改工具本身 |
 | `requirements.lock.txt` | 连传递依赖一起钉死（28 个包） | 换机器复现环境、排查环境差异 |
 
-> 本工程的锁定版本实测基线：**Python 3.13.12 / macOS arm64**，340 个单测 + 端到端套件通过。全部依赖要求 Python >= 3.10。
+> 本工程的锁定版本实测基线：**Python 3.13.12 / macOS arm64**，344 个单测 + 端到端套件通过。全部依赖要求 Python >= 3.10。
 
 **方式二：从源码安装（带 `forgeqa` 命令）**
 
@@ -329,6 +329,31 @@ steps:
 
 `target` 给多个候选定位策略，**按顺序尝试，谁先命中用谁**，首选策略等满超时、备选策略快速试探。
 页面结构微调时通常不需要改用例——这是 UI 层「适配任意网站」的落地方式。
+
+### 想开着浏览器看执行
+
+默认 `headless: true` 不弹窗。调试用例时切成有头模式，浏览器会真实弹出来逐步执行：
+
+```bash
+# 临时切换，不改配置文件（--set 优先级最高）
+forgeqa run --cases cases --set ui.headless=false --set ui.slow_mo=400
+
+# 或环境变量（适合本机调试脚本）
+FORGEQA_UI_HEADLESS=false forgeqa run --cases cases
+```
+
+`slow_mo`（毫秒）是 Playwright 的原生参数，在每个动作（goto/fill/click）之间强制停顿。
+**有头模式必须配它**——测试通常几秒跑完，不配的话浏览器一闪就关了，什么都看不到。
+建议 200~500；配大了纯耗时间。
+
+| 场景 | 建议 |
+|---|---|
+| 本机调试失败用例 | `--set ui.headless=false --set ui.slow_mo=400` |
+| 日常回归 / CI | 保持 `headless: true`，快且省资源；失败时有 `screenshot_on_fail` 截图可查 |
+| 只想看某一条 | `forgeqa run --cases cases --id TC-XXX-001 --set ui.headless=false --set ui.slow_mo=400` |
+
+> 注意：只有含 `ui:` 步骤的用例才会开浏览器。纯 `http:` / `sql:` 用例（如 `import` 生成的
+> 接口用例）没有浏览器环节，有头无头对它们没有区别。
 
 ---
 
@@ -757,6 +782,11 @@ defaults:                        # 所有环境共享，各环境只写差异
   ui: {browser: chromium, headless: true, timeout: 15000,
        viewport: {width: 1440, height: 900}, screenshot_on_fail: true,
        fallback_probe_timeout: 1200}
+  # 想开着浏览器看执行：headless: false + slow_mo（每个动作间隔毫秒数，不配则一闪而过）。
+  # 临时切换不必改文件：
+  #   forgeqa run --cases cases --set ui.headless=false --set ui.slow_mo=400
+  # 或 CI 之外的环境变量：FORGEQA_UI_HEADLESS=false
+  # ui.slow_mo: 400                 # 调试用；有头观察时建议 200~500
   db:
     driver: sqlite               # sqlite（零依赖）| sqlalchemy
     path: ./out/forgeqa.db
@@ -1119,7 +1149,7 @@ forgeqa/
 │   ├── factory.py             (788)  造数引擎：Faker / 派生字段 / 边界·异常·极端变异 / schema 反推
 │   ├── httpclient.py          (620)  requests 封装：变量提取、重试退避、基线录制、代理绕过、登录引导
 │   ├── db.py                  (561)  SQL 层：SQLite 零依赖 / SQLAlchemy 双驱动、精确回收、快照 diff
-│   ├── uiauto.py              (664)  Playwright 声明式 DSL：多策略选择器、填值读回校验、视觉像素回归
+│   ├── uiauto.py              (674)  Playwright 声明式 DSL：多策略选择器、填值读回校验、视觉像素回归、有头观察模式
 │   ├── assertions.py          (412)  35+ 断言算子 + 自研 JSONPath 子集 + 结构校验（接口/SQL/UI 共用）
 │   ├── report.py              (420)  自包含 HTML 报告（截图内嵌）+ JUnit XML + 失败根因四分类
 │   └── errors.py              ( 64)  统一异常体系，每个异常自带 hint 修复建议
@@ -1145,7 +1175,7 @@ forgeqa/
 │   └── selfcheck_cases/
 │       └── selfcheck_must_fail.yaml (34)  故意失败的用例，验证工具能抓出问题
 │
-├── tests/                            # 340 个单元测试，按模块拆分
+├── tests/                            # 344 个单元测试，按模块拆分
 │   ├── test_runner.py         (419)  用例引擎端到端流程
 │   ├── test_config.py         (308)  配置三层合并、插值、循环引用守卫
 │   ├── test_factory.py        (242)  造数可复现性与变异
@@ -1155,7 +1185,7 @@ forgeqa/
 │   ├── test_apidoc.py         (586)  接口文档导入：Schema 翻译、3.1 联合类型摊平、鉴权守卫生成、端到端
 │   ├── test_cli.py            (148)  --set 参数映射与优先级、init 守卫与重复执行提示
 │   ├── test_auth.py           (153)  登录引导：类型门槛、预备请求顺序、失败显式报错、凭证插值
-│   └── test_uiauto.py         (132)  UI 定位等待状态与 fill 读回校验（需本机 chromium，无则跳过）
+│   └── test_uiauto.py         (208)  UI 定位等待状态、fill 读回校验、slow_mo 传参（需本机 chromium，无则跳过）
 │
 ├── out/                              # 运行产物（报告/数据/基线/截图），已 gitignore，跑一次就有
 ├── pyproject.toml                    # 包元数据 + 依赖分组 + forgeqa 命令入口
@@ -1207,7 +1237,7 @@ cli.py ──▶ scan.py    在线探站点 → 冒烟用例 + 登录守卫用�
 PYTHONPATH=. pytest tests -q
 ```
 
-**340 个用例**，全部通过。分布：
+**344 个用例**，全部通过。分布：
 
 | 文件 | 用例数 | 覆盖内容 |
 |---|---|---|
@@ -1220,6 +1250,6 @@ PYTHONPATH=. pytest tests -q
 | `test_db.py` | 22 | SQL 层、造数回收、快照 diff |
 | `test_cli.py` | 18 | `--set` 参数映射与优先级、init 守卫与重复执行提示 |
 | `test_auth.py` | 18 | 登录引导：类型门槛、预备请求顺序、失败显式报错、`auth` 段凭证插值 |
-| `test_uiauto.py` | 4 | UI 定位等待状态、fill 读回校验：值被 autofocus 类脚本抢走时自动重填（无 chromium 自动跳过） |
+| `test_uiauto.py` | 8 | UI 定位等待状态、fill 读回校验：值被 autofocus 类脚本抢走时自动重填；slow_mo 必须真传给浏览器启动参数（无 chromium 自动跳过） |
 
 不依赖网络与外部服务（SQLite + 合成响应）；`test_uiauto.py` 需要本机浏览器，缺省自动跳过。

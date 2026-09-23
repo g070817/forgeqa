@@ -48,12 +48,12 @@ def _chromium_available() -> bool:
     return _CHROMIUM
 
 
-def _driver(tmp_path: Path) -> UiDriver:
+def _driver(tmp_path: Path, **extra) -> UiDriver:
     ctx = Context(layers={})
     return UiDriver(
         ctx,
         {"browser": "chromium", "headless": True, "timeout": 10000,
-         "viewport": {"width": 800, "height": 600}, "base_url": "https://demo.invalid"},
+         "viewport": {"width": 800, "height": 600}, "base_url": "https://demo.invalid", **extra},
         artifacts_dir=tmp_path,
     ).start()
 
@@ -130,3 +130,79 @@ class TestFillVerification:
             assert "值对不上" in str(excinfo.value)
         finally:
             d.stop()
+
+
+class TestSlowMo:
+    """有头观察模式：slow_mo 要真正传给浏览器启动参数。"""
+
+    def test_read_from_opts_with_default_zero(self, tmp_path):
+        assert UiDriver(Context(layers={}), {}, artifacts_dir=tmp_path).slow_mo == 0
+        assert _driver(tmp_path).slow_mo == 0
+        d = UiDriver(Context(layers={}), {"slow_mo": 300}, artifacts_dir=tmp_path)
+        assert d.slow_mo == 300
+
+    def test_rejects_negative(self, tmp_path):
+        assert UiDriver(Context(layers={}), {"slow_mo": -5},
+                        artifacts_dir=tmp_path).slow_mo == 0
+
+    def test_passed_to_browser_launch(self, tmp_path):
+        """slow_mo > 0 时必须真的进 launch_kwargs——配置了却不生效是最坑的假象。"""
+        captured: dict = {}
+
+        class FakeBrowser:
+            def new_context(self, **ckw):
+                return self
+
+            def set_default_timeout(self, ms): ...
+
+            def new_page(self):
+                return self
+
+            def on(self, *a, **k): ...
+
+        class FakeLauncher:
+            def launch(self, **kw):
+                captured.update(kw)
+                return FakeBrowser()
+
+        class FakePW:
+            chromium = FakeLauncher()
+
+        d = UiDriver(Context(layers={}),
+                     {"slow_mo": 250, "headless": False,
+                      "viewport": {"width": 1, "height": 1}, "locale": "en"},
+                     artifacts_dir=tmp_path)
+        d._pw = FakePW()
+        d._launch()
+        assert captured.get("slow_mo") == 250
+        assert captured.get("headless") is False
+
+    def test_omitted_when_zero(self, tmp_path):
+        """slow_mo 未配时不要往 launch 里传 0——保持与不配置时行为一致。"""
+        captured: dict = {}
+
+        class FakeBrowser:
+            def new_context(self, **ckw):
+                return self
+
+            def set_default_timeout(self, ms): ...
+
+            def new_page(self):
+                return self
+
+            def on(self, *a, **k): ...
+
+        class FakeLauncher:
+            def launch(self, **kw):
+                captured.update(kw)
+                return FakeBrowser()
+
+        class FakePW:
+            chromium = FakeLauncher()
+
+        d = UiDriver(Context(layers={}),
+                     {"viewport": {"width": 1, "height": 1}, "locale": "en"},
+                     artifacts_dir=tmp_path)
+        d._pw = FakePW()
+        d._launch()
+        assert "slow_mo" not in captured
