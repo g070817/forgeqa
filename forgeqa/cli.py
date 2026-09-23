@@ -488,14 +488,17 @@ def cmd_scan(args) -> int:
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
-    _print(f"扫描 {base}（OpenAPI → 页面爬取 → 路径字典，最多 {args.max_pages} 页 / "
-           f"{args.max_probes} 个试探）…\n")
+    _print(f"扫描 {base}（OpenAPI → REST 路由表 → 页面爬取 → 路径字典，最多 "
+           f"{args.max_pages} 页 / {args.max_probes} 个试探）…\n")
     result = scan_site(base, start_paths=tuple(args.path) or ("/",),
                        max_pages=args.max_pages, timeout=args.timeout,
                        headers=headers, max_probes=args.max_probes)
 
     if result.openapi_from:
         _print(f"✓ 发现 OpenAPI 文档: {result.openapi_from}（接口清单来自文档，最可靠）")
+    if result.route_table_from:
+        _print(f"✓ 发现 REST 路由表: {result.route_table_from}"
+               f"（站点自描述的接口清单，如 WordPress 的 wp/v2 系列）")
     _print(f"爬取页面 {result.pages_crawled} 个，发现接口 {len(result.endpoints)} 个\n")
 
     header = ["路径", "方法", "GET", "Content-Type", "schema", "来源"]

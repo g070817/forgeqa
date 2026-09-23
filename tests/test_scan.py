@@ -17,6 +17,8 @@ from forgeqa.scan import (
     is_static,
     normalize_path,
     parse_openapi,
+    parse_route_table,
+    route_table_prefix,
     write_case_file,
     write_schemas,
 )
@@ -86,9 +88,76 @@ class TestEntityFor:
         ("/health", "health"),
         ("/", "root"),
         ("/api/user-profiles", "user_profiles"),
+        ("/api/users?size=10", "users"),                       # 带查询串
+        ("/?rest_route=/wp/v2/posts", "posts"),                # WordPress 朴素固定链接
+        ("/wp-json/wp/v2/categories", "categories"),           # WordPress 伪静态
     ])
     def test_basic(self, path, expect):
         assert entity_for(path) == expect
+
+
+# --------------------------------------------------------------------------- #
+# REST 路由表（WordPress 等：没有 OpenAPI，但自描述接口清单）
+# --------------------------------------------------------------------------- #
+class TestRouteTablePrefix:
+    @pytest.mark.parametrize("entry, expect", [
+        ("/?rest_route=/", "/?rest_route="),     # 后接 /wp/v2/posts 才是完整地址
+        ("/wp-json/", "/wp-json"),
+        ("/wp-json", "/wp-json"),
+        ("/routes", "/routes"),
+    ])
+    def test_prefix(self, entry, expect):
+        assert route_table_prefix(entry) == expect
+
+
+class TestParseRouteTable:
+    TABLE = {"routes": {
+        "/wp/v2/posts": {"methods": ["GET", "POST"]},
+        "/wp/v2/settings": {"methods": ["GET", "PATCH"]},
+        "/wp/v2/posts/(?P<id>[\\d]+)": {"methods": ["GET", "DELETE"]},   # 模板路径
+        "/wp/v2/posts/{id}/revisions": {"methods": ["GET"]},             # 占位符路径
+        "/oembed/1.0": {"methods": []},                                  # 没有方法
+        "/_links": "不是字典",
+    }}
+
+    def test_expands_and_filters(self):
+        eps = parse_route_table(self.TABLE, prefix="/?rest_route=")
+        assert {e.path for e in eps} == {
+            "/?rest_route=/wp/v2/posts", "/?rest_route=/wp/v2/settings"}
+        assert all(e.source == "routetable" for e in eps)
+
+    def test_methods_kept(self):
+        eps = parse_route_table(self.TABLE, prefix="/wp-json")
+        settings = next(e for e in eps if e.path.endswith("settings"))
+        assert settings.methods == {"GET", "PATCH"}
+
+    def test_empty_table(self):
+        assert parse_route_table({}, prefix="") == []
+        assert parse_route_table({"routes": {}}, prefix="") == []
+
+
+class TestCaseDocsForAuthEndpoints:
+    def _result(self, status: int) -> ScanResult:
+        ep = Endpoint(path="/?rest_route=/wp/v2/settings", methods={"GET"},
+                      status=status, content_type="application/json",
+                      source="routetable")
+        return ScanResult(base_url="http://127.0.0.1:8080", endpoints=[ep])
+
+    def test_401_becomes_login_gated_case(self):
+        """需要登录的端点也要出用例，并且必须带条件跳过——
+        没配凭证时老实显示「跳过」，而不是 0 步骤的假通过。"""
+        doc = build_case_docs(self._result(401))[0]
+        assert doc["skip_if"] == "${cfg.auth.type:-none} == 'none'"
+        assert doc["steps"][0]["assert"] == [{"status": 200}]
+
+    def test_200_stays_anonymous_smoke(self):
+        doc = build_case_docs(self._result(200))[0]
+        assert "skip_if" not in doc
+        assert doc["steps"][0]["assert"][0] == {"status": 200}
+
+    def test_403_ignored(self):
+        """403 是「已认证但无权限」，跟「缺登录态」不是一回事，不生成用例。"""
+        assert build_case_docs(self._result(403)) == []
 
 
 # --------------------------------------------------------------------------- #

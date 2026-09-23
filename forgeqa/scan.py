@@ -45,6 +45,17 @@ OPENAPI_CANDIDATES = (
     "/v2/swagger.json", "/api-docs", "/api/openapi.json", "/api/swagger.json",
 )
 
+#: 「REST 路由表」入口：框架把接口清单作为 JSON 暴露出来（WordPress 等）。
+#: 命中后按路由表展开，精度仅次于 OpenAPI，远好于路径字典盲试。
+#:   WordPress 朴素固定链接必须走 rest_route 查询串（/wp-json/ 会 404），
+#:   开启伪静态后 /wp-json/ 才可用；两种入口拼出的接口地址形式不同。
+ROUTE_TABLE_CANDIDATES = (
+    "/?rest_route=/",       # WordPress：朴素固定链接
+    "/wp-json/",            # WordPress：已开伪静态
+    "/wp-json",
+    "/routes",              # 自研框架常见约定
+)
+
 #: 高频接口路径字典。扫描器没有读心术，字典决定「盲区」的大小。
 WORDLIST = (
     "/health", "/healthz", "/ready", "/actuator/health", "/status",
@@ -64,6 +75,12 @@ _JS_API_RE = re.compile(r"""["'](/(?:api|v\d)(?:/[A-Za-z0-9_\-{}.:$?=&]+)+)["']"
 _HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
 _MAX_SAMPLE_BYTES = 200_000      # 超大响应不作为 schema 反推样本
 _MAX_PATH_LEN = 120
+
+#: 路由表里带正则参数的模板路径，如 /wp/v2/posts/(?P<id>[\d]+)：无法直接请求
+_REGEX_ARG_RE = re.compile(r"\(\?P?[<\w]")
+
+#: 一次扫描最多采纳多少条路由表条目（WordPress 的路由表动辄上百条）
+MAX_ROUTES = 40
 
 
 # --------------------------------------------------------------------------- #
@@ -96,6 +113,7 @@ class ScanResult:
     endpoints: list[Endpoint] = field(default_factory=list)
     pages_crawled: int = 0
     openapi_from: str | None = None    # openapi 文档的来源路径
+    route_table_from: str | None = None  # REST 路由表的来源路径（WordPress 等）
     errors: list[str] = field(default_factory=list)
 
     def endpoint(self, path: str) -> Endpoint:
@@ -143,8 +161,18 @@ def extract_paths(text: str) -> set[str]:
 
 
 def entity_for(path: str) -> str:
-    """/api/users/42 → users。用作 schema 文件名与实体名。"""
-    segs = [s for s in re.split(r"/+", path) if s and not s.startswith("{")]
+    """/api/users/42 → users。用作 schema 文件名与实体名。
+
+    路径可能带查询串，两种形式都先剥掉再取段：
+    ``/api/users?size=10`` → users、``/?rest_route=/wp/v2/posts``（WordPress）→ posts。
+    """
+    core = path
+    m = re.search(r"rest_route=([^&]*)", core)
+    if m:
+        core = m.group(1)
+    elif "?" in core:
+        core = core.split("?", 1)[0]
+    segs = [s for s in re.split(r"/+", core) if s and not s.startswith("{")]
     if not segs:
         return "root"
     last = segs[-1]
@@ -167,9 +195,34 @@ def parse_openapi(spec: dict[str, Any]) -> list[Endpoint]:
 
 
 def build_case_docs(result: ScanResult) -> list[dict[str, Any]]:
-    """把扫描结果变成可直接运行的 GET 冒烟用例。"""
+    """把扫描结果变成可直接运行的用例草稿。
+
+    两类产出：
+
+    - ``GET 200`` → 匿名冒烟，开箱即跑；
+    - ``GET 401`` → 「登录后可访问」，步骤上带守卫：只有配置里声明了登录
+      （``auth.type != none``）才执行，否则整步跳过。这样同一份草稿在
+      「没配凭证」和「配了凭证」两种跑法下都不会假失败。
+    """
     docs: list[dict[str, Any]] = []
     for ep in sorted(result.endpoints, key=lambda e: e.path):
+        if ep.status == 401:
+            docs.append({
+                "id": f"TC-SCAN-{len(docs) + 1:03d}",
+                "title": f"登录后可访问: GET {ep.path}",
+                "priority": "P3",
+                "layer": "api",
+                "tags": ["scan", "auth"],
+                # 用用例级条件跳过（而非步骤级 if）：报告里如实计为「跳过」，
+                # 而不是「0 个步骤全部不执行」导致的假通过
+                "skip_if": "${cfg.auth.type:-none} == 'none'",
+                "steps": [{
+                    "name": f"GET {ep.path}（需登录态）",
+                    "http": {"method": "GET", "path": ep.path},
+                    "assert": [{"status": 200}],
+                }],
+            })
+            continue
         if ep.status != 200:              # 只给「GET 通了」的路径生成冒烟
             continue
         assertions: list[dict[str, Any]] = [{"status": 200}, {"time_lt": 5000}]
@@ -224,6 +277,59 @@ def detect_openapi(base: str, *, timeout: float, headers: dict[str, str]) -> tup
     return None
 
 
+def route_table_prefix(entry: str) -> str:
+    """由命中的路由表入口推断「接口地址前缀」。
+
+    ``/?rest_route=/`` → ``/?rest_route=``（后接 /wp/v2/posts 才是完整地址）
+    ``/wp-json/``      → ``/wp-json``
+    """
+    if "rest_route" in entry:
+        return entry.rsplit("=", 1)[0] + "="
+    return entry.rstrip("/")
+
+
+def detect_route_table(base: str, *, timeout: float,
+                       headers: dict[str, str]) -> tuple[str, dict] | None:
+    """探测站点自描述的 REST 路由表（WordPress 等），返回 (入口路径, 路由表)。
+
+    这类站点没有 OpenAPI 文档，但会把「接口清单」作为一个 JSON 返回——
+    对扫描器来说等价于一份权威文档，比路径字典盲试精确得多。
+    """
+    for cand in ROUTE_TABLE_CANDIDATES:
+        status, hdrs, text = _fetch(base + cand, timeout=timeout, headers=headers)
+        if status != 200 or "json" not in hdrs.get("Content-Type", "").lower():
+            continue
+        if len(text) > _MAX_SAMPLE_BYTES:
+            continue
+        try:
+            table = json.loads(text)
+        except ValueError:
+            continue
+        if isinstance(table, dict) and isinstance(table.get("routes"), dict) and table["routes"]:
+            return cand, table
+    return None
+
+
+def parse_route_table(table: dict[str, Any], *, prefix: str) -> list[Endpoint]:
+    """把路由表展开成候选接口。
+
+    只收「纯路径」：``/wp/v2/posts/(?P<id>[\\d]+)`` 这类带正则参数的模板路径无法
+    直接请求，硬造用例只会得到一堵 404，交给 probe / import 处理更合适。
+    """
+    endpoints: list[Endpoint] = []
+    for route, item in (table.get("routes") or {}).items():
+        route = str(route)
+        if not isinstance(item, dict) or _REGEX_ARG_RE.search(route) or "{" in route:
+            continue
+        methods = {str(m).upper() for m in (item.get("methods") or [])
+                   if str(m).lower() in _HTTP_METHODS}
+        if not methods:
+            continue
+        endpoints.append(Endpoint(path=f"{prefix}{route}", methods=methods,
+                                  source="routetable"))
+    return endpoints
+
+
 def scan_site(
     base: str,
     *,
@@ -246,6 +352,21 @@ def scan_site(
         result.openapi_from = from_path
         for ep in parse_openapi(spec):
             endpoints[ep.path] = ep
+
+    # --- 1.5 REST 路由表（WordPress 等：没有 OpenAPI，但自描述接口清单）----
+    route_paths: list[str] = []
+    rt = detect_route_table(base, timeout=timeout, headers=headers)
+    if rt:
+        entry, table = rt
+        result.route_table_from = entry
+        discovered = parse_route_table(table, prefix=route_table_prefix(entry))
+        # GET 能直接产出冒烟用例，优先保留；写接口仅作记录
+        discovered.sort(key=lambda e: "GET" not in e.methods)
+        for ep in discovered[:MAX_ROUTES]:
+            if ep.path in endpoints:
+                continue
+            endpoints[ep.path] = ep
+            route_paths.append(ep.path)
 
     # --- 2. 爬页面收集候选 ----------------------------------------------
     candidates: set[str] = set()
@@ -273,9 +394,11 @@ def scan_site(
                     page_queue.append(norm)
 
     # --- 3. 候选 + 字典，逐个 GET 试探 -----------------------------------
-    probes = sorted(candidates | set(WORDLIST))
+    # 路由表是站点自描述的权威清单，优先探测，且不占用字典试探的配额
+    probes = sorted((candidates | set(WORDLIST)) - set(route_paths))
     if len(probes) > max_probes:
         probes = probes[:max_probes]
+    probes = route_paths + probes
     for path in probes:
         if path in endpoints:                      # openapi 已覆盖，只补试探信息
             ep = endpoints[path]
